@@ -24,7 +24,7 @@ loadEnv();
 const API_KEY = process.env.SMALLEST_API_KEY;
 const LANGUAGE = process.env.PET_LANGUAGE || 'en';
 const STT_URL = 'wss://api.smallest.ai/waves/v1/stt/live';
-const WINDOW_HEIGHT = 340;
+const WINDOW_HEIGHT = 420;
 
 let win = null;
 let tray = null;

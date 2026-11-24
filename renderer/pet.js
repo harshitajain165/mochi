@@ -3,12 +3,12 @@
 
 (() => {
   const bridge = window.petBridge;
-  const SCALE = 4;                       // screen pixels per sprite pixel
+  const SCALE = 6;                       // screen pixels per sprite pixel
   const CAT_W = Sprite.W * SCALE;
   const CAT_H = Sprite.H * SCALE;
   const GROUND = 10;                     // px from bottom of window to paws
-  const RUN_SPEED = 620;                 // px/s
-  const WALK_SPEED = 110;
+  const RUN_SPEED = 780;                 // px/s
+  const WALK_SPEED = 140;
 
   // ---------- canvas ----------
   const stage = document.getElementById('stage');
@@ -62,7 +62,7 @@
     moveTo(dir > 0 ? VW - margin : margin, 'run');
   }
 
-  function hop(power = 520) {
+  function hop(power = 640) {
     if (pet.y > 0) return;
     pet.vy = power;
     pet.y = 0.01;
@@ -97,7 +97,7 @@
       case 'run': runAcross(); break;
       case 'run_left': runAcross(-1); break;
       case 'run_right': runAcross(1); break;
-      case 'walk': moveTo(pet.x + pet.dir * 380, 'walk'); break;
+      case 'walk': moveTo(pet.x + pet.dir * 480, 'walk'); break;
       case 'jump': if (pet.pose !== 'run' && pet.pose !== 'walk') pet.pose = 'stand'; hop(); break;
       case 'turn': pet.dir = -pet.dir; if (pet.target != null) runAcross(pet.dir); break;
       case 'dance': pet.target = null; pet.pose = 'stand'; pet.dance = { t: 0, step: 0 }; break;
@@ -156,7 +156,7 @@
         pet.dance.t = 0;
         pet.dance.step++;
         pet.dir = -pet.dir;
-        if (pet.dance.step % 2 === 0) hop(380);
+        if (pet.dance.step % 2 === 0) hop(470);
         if (pet.dance.step === 4) burst('heart', 3);
         if (pet.dance.step >= 8) pet.dance = null;
       }
@@ -242,7 +242,7 @@
     const shrink = Math.max(0.4, 1 - pet.y / 300);
     ctx.fillStyle = 'rgba(0,0,0,0.18)';
     ctx.beginPath();
-    ctx.ellipse(pet.x, VH - GROUND - 2, 58 * shrink, 7 * shrink, 0, 0, Math.PI * 2);
+    ctx.ellipse(pet.x, VH - GROUND - 2, 87 * shrink, 10 * shrink, 0, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.save();
@@ -259,8 +259,8 @@
     for (const p of particles) {
       const a = Math.max(0, 1 - p.age / p.life);
       const sy = VH - GROUND - p.y;
-      if (p.kind === 'heart') drawGlyph(Sprite.HEART, p.x, sy, 4, '#ff5c8a', a);
-      else drawGlyph(Sprite.ZED, p.x + pet.dir * 50, sy - 20, 3 + p.age * 1.5, '#5b6cff', a);
+      if (p.kind === 'heart') drawGlyph(Sprite.HEART, p.x, sy, 6, '#ff5c8a', a);
+      else drawGlyph(Sprite.ZED, p.x + pet.dir * 75, sy - 30, 4 + p.age * 2, '#5b6cff', a);
     }
 
     positionBubble();
