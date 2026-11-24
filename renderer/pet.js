@@ -412,8 +412,6 @@
   // cat reacts while you're still finishing the sentence. Each command
   // fires once per segment; the segment resets when Pulse marks it final.
   let firedKey = null;
-  let lastVoiceAt = 0;     // last time the mic heard speech energy
-  let speaking = false;
 
   bridge.onTranscript((m) => {
     const text = (m.transcript || '').trim();
@@ -424,13 +422,7 @@
         if (key !== firedKey) {
           firedKey = key;
           execute(hit.cmd);
-          const now = performance.now();
-          const gap = Math.round(now - lastVoiceAt);
-          const meta = !lastVoiceAt || gap > 5000 ? 'powered by Smallest Pulse'
-            : speaking || gap < 40
-            ? '⚡ reacted while you were still talking'
-            : `⚡ ${gap} ms after you stopped talking`;
-          showBubble(highlight(hit), meta);
+          showBubble(highlight(hit));
           hudHeard.innerHTML = 'heard: ' + hit.words
             .map((w, i) => (i >= hit.start && i < hit.end ? `<b>${esc(w)}</b>` : esc(w)))
             .join(' ');
@@ -445,7 +437,7 @@
 
   // ---------- microphone ----------
   // AudioContext at 16 kHz lets Chromium resample for us; the worklet packs
-  // 50 ms chunks of Int16 PCM and reports their loudness for the meter/VAD.
+  // 50 ms chunks of Int16 PCM and reports their loudness for the level meter.
   let noiseFloor = 0.01;
   async function startMic() {
     try {
@@ -483,12 +475,10 @@
 
       onChunk = (data) => {
         if (!muted) bridge.sendAudio(data.pcm);
-        // simple energy VAD, only used for the latency readout + meter
+        // level meter: brighter green when it sounds like speech
         const rms = data.rms;
         if (rms < noiseFloor * 2) noiseFloor = noiseFloor * 0.98 + rms * 0.02;
         const isVoice = rms > Math.max(0.02, noiseFloor * 3);
-        if (isVoice) lastVoiceAt = performance.now();
-        speaking = isVoice;
         meterFill.style.width = `${Math.min(100, (rms / 0.15) * 100)}%`;
         meterFill.style.background = isVoice ? '#3ddc84' : '#6b8f7a';
       };

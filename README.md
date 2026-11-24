@@ -2,7 +2,7 @@
 
 A hand-drawn fluffy cat that lives along the bottom of your screen and does what you tell it, using **Smallest AI Pulse** real-time speech-to-text.
 
-Built to show off Pulse on **short utterances**: commands fire on *interim* transcripts, so the cat often moves before you've finished the word. The bubble shows roughly how many ms after you stopped talking it reacted.
+Built to show off Pulse on **short utterances**: commands fire on *interim* transcripts, so the cat often moves before you've finished the word.
 
 ## Run it
 
@@ -61,4 +61,3 @@ If you say more than one command, the last one wins ("sit… no, run!" → it ru
 
 - Use short, sharp commands: "sit." pause, "run!" pause, "jump!" Short words are the point.
 - Background talk can trigger common words like "up", "down", "go" and "right". Mute with ⌘⇧M while you explain, or remove those words from `commands.js`.
-- The ms figure is approximate: it comes from a simple loudness detector, not from the server.
