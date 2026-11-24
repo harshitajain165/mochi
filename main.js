@@ -1,4 +1,4 @@
-// Smallest Pixel Pet — main process
+// Mochi — main process
 // Owns the transparent overlay window and the Smallest Pulse STT WebSocket.
 // The API key stays here (Node side); the renderer only ships raw PCM over IPC.
 
@@ -180,7 +180,7 @@ function toggleMute() {
 
 function refreshTray() {
   if (!tray) return;
-  tray.setToolTip(`Pixel Pet — ${statusLabel()}`);
+  tray.setToolTip(`Mochi — ${statusLabel()}`);
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: statusLabel(), enabled: false },
     { type: 'separator' },
@@ -199,7 +199,7 @@ function refreshTray() {
       ].map((l) => ({ label: l, enabled: false })),
     },
     { type: 'separator' },
-    { label: 'Quit Pixel Pet', role: 'quit' },
+    { label: 'Quit Mochi', role: 'quit' },
   ]));
 }
 

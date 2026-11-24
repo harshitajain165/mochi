@@ -1,4 +1,4 @@
-// Pixel Pet — renderer: mic capture → main (→ Smallest Pulse), command
+// Mochi — renderer: mic capture → main (→ Smallest Pulse), command
 // handling, the cat's little state machine, and drawing.
 
 (() => {

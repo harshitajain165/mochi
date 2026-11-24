@@ -23,6 +23,7 @@ The cat appears along the bottom of your screen. macOS asks for microphone acces
 - *Status says "API key rejected":* check the key in `.env`, then use **Reconnect** in the tray menu.
 - *No reaction when you talk:* check System Settings → Privacy & Security → Microphone and make sure Terminal is allowed, then restart the app.
 - *Wrong language:* set `PET_LANGUAGE` in `.env` (e.g. `hi`).
+- *Reacts to background chatter:* short words like "up", "down", "go" and "right" are commands. Mute with **⌘/Ctrl+Shift+M**, or remove them from `renderer/commands.js`.
 
 ## Talk to it
 
@@ -34,14 +35,14 @@ The cat appears along the bottom of your screen. macOS asks for microphone acces
 | **left** / **right** | runs that way |
 | **walk** | wanders a few steps |
 | **stop** / **stay** | stops where it is |
-| **jump** | hops |
+| **jump** / **hop** | jumps |
 | **lie down** / **down** | lies down |
 | **sleep** / **wake up** | naps (Zzz) / wakes up |
 | **come here** | runs to your mouse cursor and sits |
 | **turn around** | flips direction |
 | **dance** | does a little dance |
-| **meow** / **speak** | meows |
-| **good kitty** | shows hearts |
+| **meow** / **speak** | meows in a little kitten voice (meow, mew or mrrp) with a head tilt |
+| **good kitty** / **good job** | happy eyes and hearts |
 
 If you say more than one command, the last one wins ("sit… no, run!" → it runs). Click the cat to pet it. The rest of the window is click-through, so it never blocks your apps.
 
@@ -52,9 +53,5 @@ If you say more than one command, the last one wins ("sit… no, run!" → it ru
 - `main.js` opens the WebSocket to `wss://api.smallest.ai/waves/v1/stt/live?model=pulse` (16 kHz linear16) with your key in the `Authorization` header. The key never reaches the page.
 - `renderer/pcm-worklet.js` captures the mic at 16 kHz and sends 50 ms PCM chunks to the main process over IPC.
 - `renderer/commands.js` holds the command words. Edit it to add tricks.
+- `renderer/pet.js` runs Mochi: movement, poses, the speech bubble, and the synthesized meow (no audio files).
 - `renderer/sprites.js` draws Mochi in code: a chibi lilac-grey tabby on an 88×64 pixel grid, built from simple shapes, auto-shaded and outlined (no image files). Colours live in one palette at the top of the file.
-
-## Demo tips
-
-- Use short, sharp commands: "sit." pause, "run!" pause, "jump!" Short words are the point.
-- Background talk can trigger common words like "up", "down", "go" and "right". Mute with ⌘⇧M while you explain, or remove those words from `commands.js`.
