@@ -1,213 +1,242 @@
-// Procedural pixel-art cat. Every frame is drawn into a tiny 44x32 grid
-// (facing right), then an outline pass runs, then it's blown up with
-// nearest-neighbour scaling so it stays crisp.
+// Mochi, chibi edition. Procedural pixel art on an 88×64 grid (facing right):
+// round body, big head, huge shiny eyes, stubby legs, chubby tail.
+// Every frame is drawn from simple shapes, auto-shaded (light on top edges,
+// shadow underneath), outlined, then scaled up with nearest-neighbour so it
+// stays crisp.
 
 const Sprite = (() => {
-  const W = 44;
-  const H = 32;
+  const W = 88;
+  const H = 64;
 
   const C = {
-    body: '#f4a259',
-    far: '#d98a45',     // far-side legs, a shade darker
-    stripe: '#cf6f32',
-    cream: '#fff1d6',
-    pink: '#f7a1b5',
-    ink: '#2a1f2d',
+    body: '#bdb7cc',     // soft lilac-grey
+    light: '#dcd8e8',
+    shade: '#9b94b0',
+    far: '#a59fb9',      // far-side legs
+    stripe: '#7e7796',
+    cream: '#fffaf3',
+    creamShade: '#ece3dc',
+    pink: '#f5a3b8',
+    blush: '#f8b9c8',
+    eye: '#35284a',
+    ink: '#2b2433',
+    white: '#ffffff',
   };
 
   let grid = new Array(W * H).fill(null);
   const clear = () => grid.fill(null);
-  const px = (x, y, c) => {
-    x = Math.round(x); y = Math.round(y);
-    if (x >= 0 && y >= 0 && x < W && y < H) grid[y * W + x] = c;
-  };
-  const rect = (x, y, w, h, c) => {
-    for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) px(x + i, y + j, c);
-  };
-  // rectangle with the four corner pixels knocked off
-  const rrect = (x, y, w, h, c) => {
-    rect(x, y, w, h, c);
-    grid[y * W + x] = null;
-    grid[y * W + x + w - 1] = null;
-    grid[(y + h - 1) * W + x] = null;
-    grid[(y + h - 1) * W + x + w - 1] = null;
-  };
-  // thick line (Bresenham, stamped with a t x t square)
-  const line = (x0, y0, x1, y1, c, t = 2) => {
-    x0 = Math.round(x0); y0 = Math.round(y0); x1 = Math.round(x1); y1 = Math.round(y1);
-    const dx = Math.abs(x1 - x0), dy = -Math.abs(y1 - y0);
-    const sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
-    let err = dx + dy;
-    for (;;) {
-      rect(x0, y0, t, t, c);
-      if (x0 === x1 && y0 === y1) break;
-      const e2 = 2 * err;
-      if (e2 >= dy) { err += dy; x0 += sx; }
-      if (e2 <= dx) { err += dx; y0 += sy; }
+  const inb = (x, y) => x >= 0 && y >= 0 && x < W && y < H;
+  const px = (x, y, c) => { x = Math.round(x); y = Math.round(y); if (inb(x, y)) grid[y * W + x] = c; };
+  const get = (x, y) => (inb(x, y) ? grid[y * W + x] : null);
+  const rect = (x, y, w, h, c) => { for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) px(x + i, y + j, c); };
+  function ellipse(cx, cy, rx, ry, c) {
+    for (let y = Math.floor(cy - ry); y <= Math.ceil(cy + ry); y++) {
+      for (let x = Math.floor(cx - rx); x <= Math.ceil(cx + rx); x++) {
+        const dx = (x - cx) / rx, dy = (y - cy) / ry;
+        if (dx * dx + dy * dy <= 1.0) px(x, y, c);
+      }
     }
-  };
-  const poly = (pts, c, t = 2) => {
-    for (let i = 0; i < pts.length - 1; i++) line(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], c, t);
-  };
+  }
+  function tri(a, b, c, col) {
+    const minx = Math.floor(Math.min(a[0], b[0], c[0])), maxx = Math.ceil(Math.max(a[0], b[0], c[0]));
+    const miny = Math.floor(Math.min(a[1], b[1], c[1])), maxy = Math.ceil(Math.max(a[1], b[1], c[1]));
+    const s = (p, q, r) => (p[0] - r[0]) * (q[1] - r[1]) - (q[0] - r[0]) * (p[1] - r[1]);
+    for (let y = miny; y <= maxy; y++) for (let x = minx; x <= maxx; x++) {
+      const p = [x, y], d1 = s(p, a, b), d2 = s(p, b, c), d3 = s(p, c, a);
+      const neg = d1 < 0 || d2 < 0 || d3 < 0, pos = d1 > 0 || d2 > 0 || d3 > 0;
+      if (!(neg && pos)) px(x, y, col);
+    }
+  }
+  function line(x0, y0, x1, y1, c, t = 1) {
+    const n = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0), 1);
+    for (let i = 0; i <= n; i++) {
+      const x = x0 + ((x1 - x0) * i) / n, y = y0 + ((y1 - y0) * i) / n;
+      if (t <= 1) px(x, y, c); else ellipse(x, y, t / 2, t / 2, c);
+    }
+  }
+  // smooth chubby tail along a quadratic curve
+  function tail(p0, p1, p2, thick, tipC) {
+    for (let i = 0; i <= 24; i++) {
+      const t = i / 24, u = 1 - t;
+      const x = u * u * p0[0] + 2 * u * t * p1[0] + t * t * p2[0];
+      const y = u * u * p0[1] + 2 * u * t * p1[1] + t * t * p2[1];
+      const r = thick * (0.75 + 0.35 * Math.sin(Math.PI * Math.min(1, t * 1.2)));
+      ellipse(x, y, r, r, t > 0.82 && tipC ? tipC : C.body);
+    }
+  }
 
-  // ---- parts ----
-  // head origin (hx, hy) = top-left of the 11x10 head block
-  function head(hx, hy, o = {}) {
-    // ears
-    px(hx + 1, hy - 3, C.body);
-    rect(hx + 1, hy - 2, 2, 1, C.body);
-    rect(hx + 1, hy - 1, 3, 1, C.body);
-    px(hx + 8, hy - 3, C.body);
-    rect(hx + 7, hy - 2, 2, 1, C.body);
-    rect(hx + 6, hy - 1, 3, 1, C.body);
-    px(hx + 2, hy - 1, C.pink);
-    px(hx + 7, hy - 1, C.pink);
-    // skull
-    rrect(hx, hy, 11, 10, C.body);
-    // forehead stripes
-    px(hx + 4, hy, C.stripe); px(hx + 4, hy + 1, C.stripe);
-    px(hx + 6, hy, C.stripe); px(hx + 6, hy + 1, C.stripe);
-    // muzzle + cheeks
-    rect(hx + 5, hy + 6, 6, 3, C.cream);
-    px(hx + 10, hy + 6, C.body);
+  // ---------- parts ----------
+  // big chibi head; (cx, cy) = centre of the skull
+  function head(cx, cy, o = {}) {
+    const look = o.look || 0;  // shifts the face toward the viewer (sitting)
+    // ears (behind skull)
+    tri([cx - 17, cy - 8], [cx - 5, cy - 15], [cx - 15, cy - 26], C.body);
+    tri([cx + 5, cy - 15], [cx + 17, cy - 8], [cx + 14, cy - 26], C.body);
+    tri([cx - 14, cy - 11], [cx - 8, cy - 14], [cx - 14, cy - 21], C.pink);
+    tri([cx + 8, cy - 14], [cx + 14, cy - 11], [cx + 13, cy - 21], C.pink);
+    // chin shadow + skull + fluffy cheeks
+    ellipse(cx, cy + 2, 19, 17, C.shade);
+    ellipse(cx, cy, 20, 17, C.body);
+    ellipse(cx, cy + 6, 21, 10, C.body);
+    px(cx - 21, cy + 9, C.body); px(cx + 21, cy + 9, C.body); px(cx - 20, cy + 11, C.body);
+    // forehead stripes + cheek stripes
+    for (const dx of [-4, 0, 4]) line(cx + dx, cy - 16, cx + dx * 0.7, cy - 11, C.stripe);
+    line(cx - 21, cy + 2, cx - 16, cy + 3, C.stripe); line(cx - 21, cy + 5, cx - 16, cy + 5, C.stripe);
+    // muzzle
+    const mx = cx + 8 + look, my = cy + 7;
+    ellipse(mx, my, 7.5, 5, C.cream);
     // eyes
-    if (o.closed) {
-      rect(hx + 2, hy + 4, 2, 1, C.ink);
-      rect(hx + 6, hy + 4, 2, 1, C.ink);
-    } else if (o.happy) {
-      px(hx + 2, hy + 4, C.ink); px(hx + 3, hy + 3, C.ink); px(hx + 4, hy + 4, C.ink);
-      px(hx + 6, hy + 4, C.ink); px(hx + 7, hy + 3, C.ink); px(hx + 8, hy + 4, C.ink);
-    } else {
-      rect(hx + 3, hy + 3, 1, 2, C.ink);
-      rect(hx + 7, hy + 3, 1, 2, C.ink);
+    const ex1 = cx - 3 + look, ex2 = cx + 10 + look, ey = cy - 1;
+    for (const ex of [ex1, ex2]) {
+      if (o.closed) {
+        px(ex - 3, ey + 1, C.eye); px(ex - 2, ey + 2, C.eye); px(ex - 1, ey + 3, C.eye); px(ex, ey + 3, C.eye);
+        px(ex + 1, ey + 3, C.eye); px(ex + 2, ey + 2, C.eye); px(ex + 3, ey + 1, C.eye);
+      } else if (o.happy) {
+        px(ex - 3, ey + 3, C.eye); px(ex - 2, ey + 2, C.eye); px(ex - 1, ey + 1, C.eye); px(ex, ey, C.eye);
+        px(ex + 1, ey + 1, C.eye); px(ex + 2, ey + 2, C.eye); px(ex + 3, ey + 3, C.eye);
+        px(ex - 2, ey + 3, C.eye); px(ex + 2, ey + 3, C.eye);
+      } else {
+        ellipse(ex, ey + 1, 3.3, 4.3, C.eye);
+        rect(ex - 2, ey - 2, 2, 2, C.white); px(ex - 1, ey, C.white);
+        px(ex + 1, ey + 3, C.white); px(ex + 2, ey + 3, C.white);
+      }
     }
+    // blush
+    rect(ex1 - 5, ey + 6, 3, 1, C.blush);
+    rect(ex2 + 3, ey + 6, 3, 1, C.blush);
     // nose + mouth
-    px(hx + 10, hy + 5, C.pink);
+    rect(mx + 2, my - 3, 3, 2, C.pink); px(mx + 3, my - 1, C.pink);
     if (o.mouthOpen) {
-      rect(hx + 8, hy + 7, 2, 2, C.ink);
-      px(hx + 8, hy + 8, C.pink);
+      ellipse(mx + 3, my + 2.5, 2.2, 2.2, C.ink); px(mx + 3, my + 4, C.pink); px(mx + 2, my + 4, C.pink);
     } else {
-      px(hx + 9, hy + 7, C.ink);
+      px(mx + 1, my, C.ink); px(mx + 2, my + 1, C.ink); px(mx + 3, my, C.ink); px(mx + 4, my + 1, C.ink); px(mx + 5, my, C.ink);
     }
   }
 
-  function leg(x0, y0, x1, y1, far) {
-    line(x0, y0, x1, y1 - 1, far ? C.far : C.body, 2);
-    rect(x1, y1, 2, 1, C.cream); // paw
+  function whiskers(cx, cy, look = 0) {
+    const mx = cx + 8 + look, my = cy + 7;
+    // drawn after the outline so they sit on top, outside the face
+    for (const [dy, ey] of [[-1, -3], [1, 1]]) line(mx + 8, my + dy, mx + 14, my + ey, C.ink);
   }
 
-  function tail(pts, sway) {
-    const p = pts.map((q, i) => [q[0] + (i === pts.length - 1 ? sway : i === pts.length - 2 ? sway * 0.5 : 0), q[1]]);
-    poly(p, C.body, 2);
-    const tip = p[p.length - 1];
-    rect(tip[0], tip[1], 2, 2, C.stripe);
+  function leg(x, top, bottom, far, w = 6) {
+    rect(x, top, w, bottom - top, far ? C.far : C.body);
+    ellipse(x + w / 2, bottom - 1, w / 2 + 0.6, 2, far ? C.creamShade : C.cream); // paw
+  }
+  // angled stubby leg for running: hip → foot
+  function legA(hx, hy, fx, fy, far) {
+    line(hx, hy, fx, fy - 2, far ? C.far : C.body, 6);
+    ellipse(fx, fy - 1, 3.6, 2, far ? C.creamShade : C.cream);
   }
 
-  // ---- poses ----
-  // t = time in seconds, f = animation frame index, o = extra flags
+  function backStripes(cx, cy, rx, ry) {
+    for (const dx of [-12, -5, 2]) {
+      const x = cx + dx, top = cy - ry * Math.sqrt(Math.max(0, 1 - (dx / rx) ** 2));
+      line(x, top + 1, x - 1, top + 4, C.stripe);
+    }
+  }
+
+  // ---------- poses ----------
   const poses = {
     stand(t, f, o) {
-      const sway = Math.round(Math.sin(t * 2.2) * 1.5);
-      tail([[12, 18], [8, 15], [6, 11], [7, 7]], sway);
-      leg(16, 21, 16, 30, true);
-      leg(30, 21, 30, 30, true);
-      rrect(11, 15, 21, 8, C.body);
-      rect(15, 21, 12, 2, C.cream);
-      [15, 19, 23].forEach((x) => rect(x, 15, 1, 2, C.stripe));
-      leg(13, 21, 13, 30, false);
-      leg(27, 21, 27, 30, false);
-      rect(28, 15, 4, 5, C.cream);
-      head(27, 7, o);
+      const sway = Math.sin(t * 2.2) * 3;
+      tail([20, 50], [8, 48], [8 + sway, 32], 3.8, C.stripe);
+      leg(22, 54, 62, true); leg(44, 54, 62, true);
+      ellipse(36, 47, 20, 13, C.body);
+      ellipse(38, 55, 12, 4.5, C.cream);
+      backStripes(36, 47, 20, 13);
+      leg(28, 55, 62, false); leg(50, 55, 62, false);
+      head(60, 29, o);
+    },
+
+    walk(t, f, o) {
+      const i = f % 6;
+      const off = [-3, -1, 2, 3, 1, -2][i];
+      const lift = [0, -1, -2, 0, 0, 0][i];
+      const bob = i % 3 === 1 ? -1 : 0;
+      const sway = Math.sin(t * 4) * 2;
+      tail([20, 50 + bob], [8, 48 + bob], [9 + sway, 32 + bob], 3.8, C.stripe);
+      leg(22 - off, 54 + bob, 62 + lift, true); leg(44 + off, 54 + bob, 62, true);
+      ellipse(36, 47 + bob, 20, 13, C.body);
+      ellipse(38, 55 + bob, 12, 4.5, C.cream);
+      backStripes(36, 47 + bob, 20, 13);
+      leg(28 + off, 55 + bob, 62, false); leg(50 - off, 55 + bob, 62 + lift, false);
+      head(60, 29 + bob, o);
+    },
+
+    run(t, f, o) {
+      const i = f % 6;
+      const bob = [-3, -1, 0, -2, -4, -3][i];
+      const FN = [[70, 60], [64, 62], [56, 62], [50, 61], [56, 58], [66, 58]];
+      const BN = [[8, 59], [14, 62], [24, 62], [30, 61], [24, 58], [12, 58]];
+      const j = (i + 1) % 6;
+      tail([20, 46 + bob], [8, 44 + bob], [1, 38 + bob], 3.6, C.stripe);
+      legA(50, 53 + bob, FN[j][0] - 3, FN[j][1], true);
+      legA(24, 53 + bob, BN[j][0] + 3, BN[j][1], true);
+      ellipse(38, 46 + bob, 22, 12, C.body);
+      ellipse(40, 53 + bob, 13, 4, C.cream);
+      backStripes(38, 46 + bob, 22, 12);
+      legA(52, 53 + bob, FN[i][0], FN[i][1], false);
+      legA(26, 53 + bob, BN[i][0], BN[i][1], false);
+      head(63, 31 + bob, o);
+    },
+
+    jump(t, f, o) {
+      tail([20, 44], [8, 40], [4, 26], 3.6, C.stripe);
+      legA(50, 51, 64, 58, true); legA(24, 51, 10, 58, true);
+      ellipse(38, 44, 22, 12, C.body);
+      ellipse(40, 51, 13, 4, C.cream);
+      backStripes(38, 44, 22, 12);
+      legA(52, 51, 68, 56, false); legA(26, 51, 8, 56, false);
+      head(63, 29, o);
     },
 
     sit(t, f, o) {
-      const sway = Math.round(Math.sin(t * 1.6) * 1.5);
-      tail([[14, 29], [8, 29], [4, 28], [3, 25]], sway);
-      rrect(11, 19, 13, 11, C.body);          // haunch
-      [13, 16].forEach((x) => rect(x, 20, 1, 2, C.stripe));
-      rrect(17, 13, 10, 14, C.body);          // torso
-      rect(23, 13, 4, 8, C.cream);            // chest
-      rect(21, 30, 3, 1, C.cream);            // back paw
-      leg(25, 20, 25, 30, true);
-      leg(27, 20, 27, 30, false);
-      head(21, 4, o);
+      const sway = Math.sin(t * 1.6) * 2;
+      tail([22, 58], [22, 64], [42 + sway, 62], 3.4, C.stripe);
+      ellipse(34, 50, 18, 12, C.body);         // round bottom
+      ellipse(40, 53, 10, 7, C.cream);         // chest/belly
+      leg(40, 56, 62, true, 5); leg(47, 56, 62, false, 5);
+      head(44, 28, { ...o, look: -2 });
     },
 
     lie(t, f, o) {
-      const sway = Math.round(Math.sin(t * 1.2) * 1.5);
-      tail([[11, 28], [6, 29], [2, 29], [1, 26]], sway);
-      rrect(9, 22, 23, 8, C.body);
-      [13, 17, 21].forEach((x) => rect(x, 22, 1, 2, C.stripe));
-      rect(30, 28, 8, 2, C.body);             // front paws stretched out
-      rect(37, 28, 2, 2, C.cream);
-      head(27, 15, o);
+      const sway = Math.sin(t * 1.2) * 2;
+      tail([14, 58], [3, 63], [3 + sway, 52], 3.4, C.stripe);
+      ellipse(34, 55, 24, 8, C.body);          // loaf
+      backStripes(32, 55, 24, 8);
+      ellipse(70, 61, 5, 2.2, C.cream); ellipse(78, 61, 5, 2.2, C.cream);   // paws peeking out
+      head(60, 44, o);
     },
 
     sleep(t, f, o) {
       const breathe = Math.sin(t * 1.4) > 0 ? 1 : 0;
-      tail([[11, 29], [6, 30], [2, 30], [1, 28]], 0);
-      rrect(9, 22 - breathe, 23, 8 + breathe, C.body);
-      [13, 17, 21].forEach((x) => rect(x, 22 - breathe, 1, 2, C.stripe));
-      rect(30, 28, 6, 2, C.body);
-      rect(34, 28, 2, 2, C.cream);
-      head(26, 20, { closed: true });
-    },
-
-    run(t, f, o) {
-      const i = f % 4;
-      const bob = [-2, 0, -1, 0][i];
-      const FN = [[35, 28], [31, 30], [24, 29], [28, 30]];
-      const BN = [[6, 28], [10, 30], [19, 29], [15, 30]];
-      const j = (i + 1) % 4;
-      tail([[12, 16 + bob], [7, 13 + bob], [3, 11 + bob], [1, 9 + bob]], 0);
-      leg(28, 20 + bob, FN[j][0] - 1, FN[j][1], true);
-      leg(14, 20 + bob, BN[j][0] + 1, BN[j][1], true);
-      rrect(11, 14 + bob, 22, 7, C.body);
-      rect(15, 19 + bob, 12, 2, C.cream);
-      [15, 19, 23].forEach((x) => rect(x, 14 + bob, 1, 2, C.stripe));
-      leg(28, 20 + bob, FN[i][0], FN[i][1], false);
-      leg(14, 20 + bob, BN[i][0], BN[i][1], false);
-      head(29, 7 + bob, o);
-    },
-
-    walk(t, f, o) {
-      const i = f % 4;
-      const off = [2, 0, -2, 0][i];
-      const bob = i % 2 === 0 ? 0 : -1;
-      const sway = Math.round(Math.sin(t * 3) * 1);
-      tail([[12, 18 + bob], [8, 15 + bob], [6, 11 + bob], [7, 7 + bob]], sway);
-      leg(16, 21 + bob, 16 - off, 30, true);
-      leg(30, 21 + bob, 30 + off, 30, true);
-      rrect(11, 15 + bob, 21, 8, C.body);
-      rect(15, 21 + bob, 12, 2, C.cream);
-      [15, 19, 23].forEach((x) => rect(x, 15 + bob, 1, 2, C.stripe));
-      leg(13, 21 + bob, 13 + off, 30, false);
-      leg(27, 21 + bob, 27 - off, 30, false);
-      rect(28, 15 + bob, 4, 5, C.cream);
-      head(27, 7 + bob, o);
-    },
-
-    jump(t, f, o) {
-      tail([[12, 15], [7, 12], [4, 9], [3, 6]], 0);
-      leg(28, 20, 34, 26, true);
-      leg(14, 20, 8, 27, true);
-      rrect(11, 14, 22, 7, C.body);
-      rect(15, 19, 12, 2, C.cream);
-      [15, 19, 23].forEach((x) => rect(x, 14, 1, 2, C.stripe));
-      leg(28, 20, 35, 25, false);
-      leg(14, 20, 7, 26, false);
-      head(29, 6, o);
+      tail([14, 60], [28, 64], [52, 62], 3.4, C.stripe);
+      ellipse(34, 55 - breathe * 0.5, 24, 8 + breathe * 0.5, C.body);
+      backStripes(32, 55, 24, 8);
+      head(58, 46, { closed: true });
     },
   };
 
+  // light on top edges, shadow along the bottom: gives the chonk volume
+  function shadePass() {
+    const g = grid.slice();
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const c = grid[y * W + x];
+      if (c !== C.body) continue;
+      const up = get(x, y - 1), up2 = get(x, y - 2);
+      const dn = get(x, y + 1), dn2 = get(x, y + 2);
+      if (!up || !up2) g[y * W + x] = C.light;
+      else if (!dn || !dn2) g[y * W + x] = C.shade;
+    }
+    grid = g;
+  }
+
   function outline() {
     const out = grid.slice();
-    for (let y = 0; y < H; y++) {
-      for (let x = 0; x < W; x++) {
-        if (grid[y * W + x]) continue;
-        const n = (xx, yy) => xx >= 0 && yy >= 0 && xx < W && yy < H && grid[yy * W + xx];
-        if (n(x - 1, y) || n(x + 1, y) || n(x, y - 1) || n(x, y + 1)) out[y * W + x] = C.ink;
-      }
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      if (grid[y * W + x]) continue;
+      if (get(x - 1, y) || get(x + 1, y) || get(x, y - 1) || get(x, y + 1)) out[y * W + x] = C.ink;
     }
     grid = out;
   }
@@ -220,10 +249,21 @@ const Sprite = (() => {
   const rgb = {};
   const toRGB = (hex) => rgb[hex] || (rgb[hex] = [1, 3, 5].map((k) => parseInt(hex.slice(k, k + 2), 16)));
 
+  // where the head sits per pose (for whiskers drawn after the outline)
+  const HEADS = {
+    stand: () => [60, 29, 0], walk: (f) => [60, 29 + (f % 6 % 3 === 1 ? -1 : 0), 0],
+    run: (f) => [63, 31 + [-3, -1, 0, -2, -4, -3][f % 6], 0], jump: () => [63, 29, 0],
+    sit: () => [44, 28, -2], lie: () => [60, 44, 0], sleep: () => [58, 46, 0],
+  };
+
   function render(pose, t, f, opts = {}) {
     clear();
-    (poses[pose] || poses.stand)(t, f, opts);
+    const fn = poses[pose] || poses.stand;
+    fn(t, f, opts);
+    shadePass();
     outline();
+    const h = (HEADS[pose] || HEADS.stand)(f);
+    whiskers(h[0], h[1], h[2]);
     const d = img.data;
     for (let k = 0; k < grid.length; k++) {
       const c = grid[k];

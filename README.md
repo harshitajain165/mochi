@@ -1,6 +1,6 @@
-# Mochi: a pixel cat that listens 🐈
+# Mochi: a chibi pixel cat that listens 🐈
 
-A pixel cat that lives along the bottom of your screen and does what you tell it, using **Smallest AI Pulse** real-time speech-to-text.
+A chibi pixel cat that lives along the bottom of your screen and does what you tell it, using **Smallest AI Pulse** real-time speech-to-text.
 
 Built to show off Pulse on **short utterances**: commands fire on *interim* transcripts, so the cat often moves before you've finished the word.
 
@@ -52,7 +52,7 @@ If you say more than one command, the last one wins ("sit… no, run!" → it ru
 - `main.js` opens the WebSocket to `wss://api.smallest.ai/waves/v1/stt/live?model=pulse` (16 kHz linear16) with your key in the `Authorization` header. The key never reaches the page.
 - `renderer/pcm-worklet.js` captures the mic at 16 kHz and sends 50 ms PCM chunks to the main process over IPC.
 - `renderer/commands.js` holds the command words. Edit it to add tricks.
-- `renderer/sprites.js` draws the cat in code on a 44×32 pixel grid (no image files).
+- `renderer/sprites.js` draws Mochi in code: a chibi lilac-grey tabby on an 88×64 pixel grid, built from simple shapes, auto-shaded and outlined (no image files). Colours live in one palette at the top of the file.
 
 ## Demo tips
 

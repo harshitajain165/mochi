@@ -3,7 +3,7 @@
 
 (() => {
   const bridge = window.petBridge;
-  const SCALE = 6;                       // screen pixels per sprite pixel
+  const SCALE = 3;                       // screen pixels per sprite pixel (88×64 grid)
   const CAT_W = Sprite.W * SCALE;
   const CAT_H = Sprite.H * SCALE;
   const GROUND = 10;                     // px from bottom of window to paws
@@ -185,7 +185,7 @@
     }
 
     // animation frames
-    const fps = pet.pose === 'run' ? 14 : pet.pose === 'walk' ? 7 : 4;
+    const fps = pet.pose === 'run' ? 16 : pet.pose === 'walk' ? 10 : 4;
     pet.frameT += dt;
     if (pet.frameT > 1 / fps) { pet.frameT = 0; pet.frame++; }
 
@@ -259,8 +259,8 @@
     for (const p of particles) {
       const a = Math.max(0, 1 - p.age / p.life);
       const sy = VH - GROUND - p.y;
-      if (p.kind === 'heart') drawGlyph(Sprite.HEART, p.x, sy, 6, '#ff5c8a', a);
-      else drawGlyph(Sprite.ZED, p.x + pet.dir * 75, sy - 30, 4 + p.age * 2, '#5b6cff', a);
+      if (p.kind === 'heart') drawGlyph(Sprite.HEART, p.x, sy, 4, '#ff5c8a', a);
+      else drawGlyph(Sprite.ZED, p.x + pet.dir * 70, sy - 30, 3 + p.age * 1.5, '#7e7796', a);
     }
 
     positionBubble();
