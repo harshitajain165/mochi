@@ -1,4 +1,4 @@
-// Mochi — main process
+// Smallest Pixel Pet — main process
 // Owns the transparent overlay window and the Smallest Pulse STT WebSocket.
 // The API key stays here (Node side); the renderer only ships raw PCM over IPC.
 
@@ -115,14 +115,6 @@ ipcMain.handle('cursor', () => {
   return { x: p.x - b.x, y: p.y - b.y };
 });
 
-// Pose images for the WebGL renderer (read here so the page gets plain bytes).
-ipcMain.handle('read-asset', (_e, rel) => {
-  // only files inside renderer/cats or renderer/anim
-  const [dir, name] = String(rel).split('/');
-  if (!['cats', 'anim'].includes(dir) || !name) throw new Error('bad asset path');
-  return fs.readFileSync(path.join(__dirname, 'renderer', dir, path.basename(name)));
-});
-
 ipcMain.handle('get-status', () => ({ ...lastStatus, muted, showHud }));
 
 // ---------- window ----------
@@ -188,7 +180,7 @@ function toggleMute() {
 
 function refreshTray() {
   if (!tray) return;
-  tray.setToolTip(`Mochi — ${statusLabel()}`);
+  tray.setToolTip(`Pixel Pet — ${statusLabel()}`);
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: statusLabel(), enabled: false },
     { type: 'separator' },
@@ -203,11 +195,11 @@ function refreshTray() {
       submenu: [
         'sit', 'stand / up', 'run (left / right)', 'walk', 'stop / stay', 'jump',
         'lie down', 'sleep / wake up', 'come here', 'turn around', 'dance', 'meow',
-        'stretch', 'play / roll over', 'catch / high five', 'good kitty',
+        'good kitty',
       ].map((l) => ({ label: l, enabled: false })),
     },
     { type: 'separator' },
-    { label: 'Quit Mochi', role: 'quit' },
+    { label: 'Quit Pixel Pet', role: 'quit' },
   ]));
 }
 

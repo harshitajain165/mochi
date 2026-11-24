@@ -18,9 +18,6 @@ const Commands = (() => {
     come: ['come', 'come here', 'here', 'come back', 'here kitty'],
     turn: ['turn around', 'turn', 'spin around', 'about face'],
     dance: ['dance', 'spin', 'party'],
-    stretch: ['stretch', 'big stretch', 'stretch out'],
-    play: ['play', 'roll over', 'roll', 'belly rub', 'play dead'],
-    reach: ['catch', 'high five', 'paw', 'butterfly', 'reach', 'swat', 'catch it'],
     meow: ['meow', 'speak', 'say something', 'talk'],
     good: ['good kitty', 'good cat', 'good boy', 'good girl', 'good job', 'well done', 'i love you'],
   };
