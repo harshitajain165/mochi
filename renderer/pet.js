@@ -1,23 +1,65 @@
 // Mochi — renderer: mic capture → main (→ Smallest Pulse), command
-// handling, Mochi's movement + transition state machine, and drawing.
+// handling, Mochi's animation state machine, and drawing.
 //
-// The poses are still drawings, so the motion comes from three things:
-//  1. a rig: tails, heads and legs bend on a WebGL mesh (cat.js, gl.js)
-//  2. procedural cycles: the run is a gallop (spine flexes, legs gather and
-//     reach, suspension arc), the walk swings front/hind legs alternately
-//  3. a transition sequencer: hard cuts with squash-and-settle instead of
-//     crossfades, crouch before sprinting, braking/skids before stopping,
-//     and "via" poses (sleep → sit → stand) so changes read as movement.
+// Movement and transitions are real animation frames cut from the reference
+// video (anim/manifest.js): getting up from a sit and walking off, a walk
+// cycle, crouch + take-off, a bounding run, landing and settling, sitting
+// back down, and easing into a stretch. Resting poses and tricks come from
+// the character sheet (cat.js) with a light rig so tails and heads stay alive.
+// A small graph decides which clip leads into which, so every change of
+// state plays its in-between frames instead of snapping.
 
 (() => {
   const bridge = window.petBridge;
-  const S = 0.85;                 // art scale (sheet px → screen px)
+  const S = 0.85;                 // sheet px → screen px
   const GROUND = 12;              // px from window bottom to paws
-  const RUN = { max: 520, accel: 1500, stride: 170 };
-  const WALK = { max: 90, accel: 320, stride: 70 };
-  const RUN_LOOK = 170;           // above this speed, show the gallop
-  const TEMP_MS = 2600;           // one-off tricks
-  const MARGIN = 120;
+  const MARGIN = 190;
+  const WALK_V = 68;              // px/s, matches the video's walk (no foot slide)
+  const RUN_V = 430;              // px/s average for the bounding run
+  const VIDEO_FPS = 24;
+  const RUN_FPS = 30;
+  const TEMP_MS = 2600;
+
+  // ---------- clips (video frame indices) ----------
+  const R = (a, b) => {
+    const o = [];
+    if (a <= b) for (let i = a; i <= b; i++) o.push(i); else for (let i = a; i >= b; i--) o.push(i);
+    return o.filter((i) => ANIM.frames[i]);
+  };
+  const CLIP = {
+    getUp: R(12, 39),                    // sit → rise → first steps (flows into walk)
+    rise: R(12, 30),                     // sit → up, quicker, before a sprint
+    standUp: R(12, 26),                  // sit → standing
+    sitDown: R(26, 12),                  // standing → sit
+    walk: R(40, 65),                     // one full stride, loops
+    takeoff: R(66, 75),                  // gather + crouch + push
+    bound: [...R(71, 75), ...R(81, 100)],// push → flight → land → gather, loops
+    land: R(93, 119),                    // touch down, settle low, walk out, stand
+    pounce: [...R(66, 75), ...R(81, 119)],
+    stretchIn: R(160, 173),
+    stretchOut: R(173, 160),
+  };
+  const STAND = 119;
+
+  function frameSpeed(f, ctx) {
+    switch (ctx) {
+      case 'walk': return WALK_V;
+      case 'getUp': return f < 22 ? 0 : WALK_V * Math.min(1, (f - 21) / 8);
+      case 'takeoff': return f <= 70 ? WALK_V : RUN_V * 0.55;
+      case 'bound': case 'land': case 'pounce': {
+        const k = ctx === 'pounce' ? 0.7 : 1;
+        if (f <= 70) return WALK_V;
+        if (f <= 75) return RUN_V * 0.6 * k;
+        if (f <= 92) return RUN_V * 1.25 * k;
+        if (f <= 100) return RUN_V * 0.55 * k;
+        if (f <= 112) return RUN_V * 0.55 * k * (1 - (f - 100) / 12);
+        return 0;
+      }
+      default: return 0;
+    }
+  }
+  const LAND_DIST = CLIP.land.reduce((s, f) => s + frameSpeed(f, 'land') / RUN_FPS, 0);
+  const POUNCE_DIST = CLIP.pounce.reduce((s, f) => s + frameSpeed(f, 'pounce') / RUN_FPS, 0);
 
   // ---------- canvases: shadow (2D) < cat (WebGL) < fx (2D) ----------
   const shadowCv = document.getElementById('shadow');
@@ -43,117 +85,161 @@
   // ---------- state ----------
   const pet = {
     x: VW * 0.62,
-    v: 0,                 // signed speed, px/s
     facing: -1,           // 1 = right, -1 = left
-    mode: 'rest',         // 'rest' | 'move'
-    rest: 'sit',          // stand | sit | lie | sleep
-    gait: 'run',          // run | walk (while moving)
+    rest: 'sit',          // stand | sit | lie | sleep  (when no clip is playing)
+    anim: null,           // { frames, i, acc, fps, loop, ctx, done }
+    gait: null,           // walk | run while travelling
     target: null,
-    after: 'stand',
-    seq: [],              // queued in-between steps: { img, ms, crouch, flip }
-    seqT: 0,
-    seqDone: null,
-    temp: null,           // one-off trick { pose, until }
-    y: 0, vy: 0, air: false,
-    t: 0, phase: 0,
+    after: 'stand',       // what to do on arrival: a rest pose, 'stretch' or 'trick:<pose>'
+    braking: false,
+    turnAfterLand: null,
+    hold: null,           // { frame, until, then }  (stretch hold)
+    temp: null,           // { pose, until }  sheet trick
+    queue: [],            // dance steps
+    t: 0,
     lastCmdAt: performance.now(),
     meowUntil: 0,
+    pendingRest: null,
   };
   const particles = [];
-  let wobbleAt = -1e9;    // when the last hard cut happened (for squash & settle)
-  let shownImg = null;
-  let lastLift = 0;
+  let wobbleAt = -1e9;
+  let lastKey = '';
+  let advanced = false;
 
+  const groundY = () => VH - GROUND;
   const clampX = (x) => Math.max(MARGIN, Math.min(VW - MARGIN, x));
-  const dirTo = (x) => (x >= pet.x ? 1 : -1);
+  const moving = () => !!pet.gait;
 
-  // ---------- sequencer ----------
-  function play(steps, done) {
-    pet.seq = steps.slice();
-    pet.seqT = 0;
-    pet.seqDone = done || null;
+  // ---------- clip player ----------
+  function play(name, opts = {}) {
+    pet.anim = {
+      frames: CLIP[name], i: 0, acc: 0,
+      fps: opts.fps || VIDEO_FPS, loop: !!opts.loop,
+      ctx: opts.ctx || name, done: opts.done || null,
+    };
   }
-  function clearSeq() { pet.seq = []; pet.seqDone = null; }
+  const curFrame = () => pet.anim && pet.anim.frames[pet.anim.i];
 
-  // what's on screen right now, before any trick/sequence
-  function restImg() {
-    if (pet.rest === 'lie') return 'bow';
-    if (pet.rest === 'sit' && performance.now() < pet.meowUntil) return 'meow';
-    return pet.rest;
-  }
-
-  // in-between pose to get up from a resting pose
-  function getUpSteps() {
-    if (pet.mode === 'move') return [];
-    if (pet.rest === 'sleep') return [{ img: 'sit', ms: 170 }, { img: 'stand', ms: 130 }];
-    if (pet.rest === 'sit' || pet.rest === 'lie') return [{ img: 'stand', ms: 140 }];
-    return [];
-  }
-
-  function setRest(pose) {
-    clearSeq();
-    pet.temp = null;
-    const from = pet.rest;
-    pet.rest = pose;
-    if (pet.mode === 'move') return;
-    // via poses so big changes don't teleport
-    if (from === 'sleep' && pose === 'stand') play([{ img: 'sit', ms: 160 }]);
-    else if (from === 'stand' && pose === 'sleep') play([{ img: 'sit', ms: 200 }, { img: 'bow', ms: 160 }]);
-    else if (from === 'sit' && pose === 'sleep') play([{ img: 'bow', ms: 180 }]);
-  }
-
-  function trick(pose, ms = TEMP_MS) {
-    if (pet.mode === 'move') stopSoon();
-    pet.temp = { pose, until: performance.now() + ms };
-  }
-
-  function startMove(gait, x, after = 'stand') {
-    pet.temp = null;
-    pet.after = after;
-    const tx = clampX(x);
-    if (Math.abs(tx - pet.x) < 8) return;
-    if (pet.mode === 'move') {          // already moving: just retarget
-      pet.gait = gait;
-      pet.target = tx;
+  function advance() {
+    const A = pet.anim;
+    advanced = true;
+    if (A.ctx === 'bound' && pet.braking && A.frames[A.i] === 92) {
+      play('land', { fps: RUN_FPS, done: landed });
       return;
     }
-    const d = dirTo(tx);
-    const steps = getUpSteps();
-    if (d !== pet.facing) steps.push({ img: steps.length ? steps[steps.length - 1].img : (pet.rest === 'stand' ? 'stand' : 'stand'), ms: 90, flip: true });
-    if (gait === 'run') steps.push({ img: 'bow', ms: 170, crouch: true });   // wind-up
-    play(steps, () => {
-      pet.mode = 'move';
-      pet.gait = gait;
-      pet.target = tx;
-      pet.facing = d;
-    });
+    if (A.i < A.frames.length - 1) { A.i++; return; }
+    if (A.loop) { A.i = 0; return; }
+    pet.anim = null;
+    if (A.done) A.done();
+    // a rest command that arrived mid-transition
+    if (!pet.anim && !pet.gait && !pet.hold && pet.pendingRest) {
+      const r = pet.pendingRest; pet.pendingRest = null; settle(r);
+    }
+  }
+
+  // ---------- transitions ----------
+  function standFromRest(then) {
+    pet.temp = null;
+    if (pet.rest === 'stand') return then();
+    if (pet.rest === 'lie' || pet.rest === 'sleep') pet.rest = 'sit';
+    play('standUp', { done: () => { pet.rest = 'stand'; then(); } });
+  }
+
+  function settle(what) {
+    pet.after = 'stand';
+    if (!what || what === 'stand') { pet.rest = 'stand'; return; }
+    if (what === 'stretch') return doStretch();
+    if (what.startsWith('trick:')) { pet.rest = 'stand'; return trick(what.slice(6)); }
+    // sit / lie / sleep: sit down first (real in-between frames), then the pose
+    if (pet.rest === 'stand') {
+      play('sitDown', { done: () => { pet.rest = what; } });
+    } else {
+      pet.rest = what;
+    }
+  }
+
+  function arrive() {
+    pet.gait = null; pet.target = null; pet.braking = false; pet.anim = null;
+    pet.rest = 'stand';
+    const t = pet.turnAfterLand; pet.turnAfterLand = null;
+    if (t) { pet.facing = -pet.facing; startMove(t.gait, t.x, t.after); return; }
+    settle(pet.after);
+  }
+  function landed() { arrive(); }
+
+  function startMove(gait, x, after = 'stand') {
+    pet.temp = null; pet.hold = null; pet.queue = [];
+    const tx = clampX(x);
+    const dir = tx >= pet.x ? 1 : -1;
+    if (moving()) {
+      if (dir !== pet.facing) {
+        if (pet.gait === 'run') { pet.braking = true; pet.turnAfterLand = { gait, x: tx, after }; return; }
+        pet.facing = dir;
+      }
+      pet.target = tx; pet.after = after;
+      if (gait === 'run' && pet.gait === 'walk') {
+        pet.gait = 'run';
+        play('takeoff', { fps: RUN_FPS, done: () => play('bound', { loop: true, fps: RUN_FPS }) });
+      } else if (gait === 'walk' && pet.gait === 'run') {
+        pet.braking = true; pet.after = after;
+      }
+      return;
+    }
+    if (Math.abs(tx - pet.x) < 12) return settle(after);
+    pet.target = tx; pet.after = after; pet.gait = gait; pet.braking = false;
+    if (dir !== pet.facing) pet.facing = dir;
+    const sprint = () => play('takeoff', { fps: RUN_FPS, done: () => play('bound', { loop: true, fps: RUN_FPS }) });
+    if (pet.rest === 'stand') {
+      if (gait === 'walk') play('walk', { loop: true }); else sprint();
+      return;
+    }
+    if (pet.rest === 'lie' || pet.rest === 'sleep') pet.rest = 'sit';
+    if (gait === 'walk') play('getUp', { done: () => play('walk', { loop: true }) });
+    else play('rise', { ctx: 'getUp', fps: RUN_FPS, done: sprint });
+  }
+
+  function stop(after = 'stand') {
+    if (!moving()) return settle(after);
+    pet.after = after;
+    pet.turnAfterLand = null;
+    if (pet.gait === 'run') pet.braking = true;
+    else arrive();
   }
 
   function runAcross(dir) {
     if (dir == null) {
       dir = pet.facing;
-      if ((dir > 0 && pet.x > VW - MARGIN - 150) || (dir < 0 && pet.x < MARGIN + 150)) dir = -dir;
+      if ((dir > 0 && pet.x > VW - MARGIN - 200) || (dir < 0 && pet.x < MARGIN + 200)) dir = -dir;
     }
     startMove('run', dir > 0 ? VW - MARGIN : MARGIN);
   }
 
-  // brake to a natural stop from the current speed
-  function stopSoon(after = 'stand') {
-    if (pet.mode !== 'move') return;
-    const g = pet.gait === 'run' ? RUN : WALK;
-    const dist = (pet.v * pet.v) / (2 * g.accel);
-    pet.target = clampX(pet.x + Math.sign(pet.v || pet.facing) * dist);
-    pet.after = after;
+  function pounce() {
+    if (pet.gait === 'run') return;
+    pet.temp = null; pet.hold = null;
+    // face away from a nearby edge
+    if (pet.x + pet.facing * (POUNCE_DIST + 40) > VW - 140 || pet.x + pet.facing * (POUNCE_DIST + 40) < 140) pet.facing = -pet.facing;
+    pet.gait = null; pet.target = null;
+    const go = () => play('pounce', { fps: RUN_FPS, done: () => { pet.rest = 'stand'; settle(pet.after); } });
+    if (pet.anim && (pet.anim.ctx === 'walk')) return go();
+    if (pet.rest === 'stand') return go();
+    if (pet.rest === 'lie' || pet.rest === 'sleep') pet.rest = 'sit';
+    play('rise', { ctx: 'still', fps: RUN_FPS, done: go });
   }
 
-  function hop(power = 600) {
-    if (pet.air) return;
-    const crouchImg = pet.mode === 'move' ? null : (pet.rest === 'stand' ? 'stand' : null);
-    const launch = () => { pet.air = true; pet.vy = power; pet.y = 0.01; };
-    if (pet.mode === 'move') { launch(); return; }
-    const steps = getUpSteps();
-    steps.push({ img: crouchImg || 'stand', ms: 110, crouch: true });
-    play(steps, () => { pet.rest = 'stand'; launch(); });
+  function doStretch() {
+    pet.temp = null;
+    play('stretchIn', { fps: 16, ctx: 'still', done: () => {
+      pet.hold = { frame: 173, until: performance.now() + 2200, then: () => {
+        play('stretchOut', { fps: 20, ctx: 'still', done: () => { pet.rest = 'sit'; } });
+      } };
+    } });
+  }
+
+  function trick(pose, ms = TEMP_MS) {
+    if (moving()) return stop('trick:' + pose);
+    pet.anim = null; pet.hold = null;
+    pet.temp = { pose, until: performance.now() + ms };
   }
 
   function burst(kind, n) {
@@ -175,48 +261,54 @@
   // ---------- commands ----------
   async function execute(cmd) {
     pet.lastCmdAt = performance.now();
+    if (cmd !== 'dance') pet.queue = [];
     switch (cmd) {
-      case 'sit': if (pet.mode === 'move') stopSoon('sit'); else setRest('sit'); break;
-      case 'stand':
-      case 'wake': if (pet.mode === 'move') stopSoon('stand'); else setRest('stand'); break;
-      case 'lie': if (pet.mode === 'move') stopSoon('lie'); else setRest('lie'); break;
-      case 'sleep': if (pet.mode === 'move') stopSoon('sleep'); else setRest('sleep'); break;
-      case 'stop': if (pet.mode === 'move') stopSoon('stand'); else { pet.temp = null; clearSeq(); } break;
+      case 'sit': case 'lie': case 'sleep':
+        if (moving()) stop(cmd);
+        else if (pet.anim || pet.hold) { pet.pendingRest = cmd; }
+        else { pet.temp = null; settle(cmd); }
+        break;
+      case 'stand': case 'wake':
+        if (moving()) stop('stand');
+        else { pet.temp = null; standFromRest(() => {}); }
+        break;
+      case 'stop':
+        if (moving()) stop('stand'); else { pet.temp = null; }
+        break;
       case 'run': runAcross(); break;
       case 'run_left': runAcross(-1); break;
       case 'run_right': runAcross(1); break;
-      case 'walk': startMove('walk', pet.x + pet.facing * 380); break;
-      case 'jump': hop(); break;
-      case 'stretch': trick('stretch'); break;
+      case 'walk': startMove('walk', pet.x + pet.facing * 420); break;
+      case 'jump': pounce(); break;
+      case 'stretch':
+        if (moving()) stop('stretch'); else if (!pet.anim) doStretch();
+        break;
       case 'play': trick('play'); burst('sparkle', 3); break;
       case 'reach': trick('reach'); break;
       case 'turn':
-        if (pet.mode === 'move') startMove(pet.gait, pet.facing > 0 ? MARGIN : VW - MARGIN, pet.after);
-        else if (pet.rest === 'sit' || pet.rest === 'stand') { pet.facing = -pet.facing; trick('back', 1500); }
-        else pet.facing = -pet.facing;
+        if (moving()) startMove(pet.gait, pet.facing > 0 ? MARGIN : VW - MARGIN, pet.after);
+        else if (pet.rest === 'sit' && !pet.anim) { pet.facing = -pet.facing; trick('back', 1500); }
+        else if (!pet.anim) pet.facing = -pet.facing;
         break;
-      case 'dance': {
-        if (pet.mode === 'move') stopSoon('stand');
-        pet.temp = null;
-        const steps = [];
-        for (let i = 0; i < 6; i++) steps.push({ img: i % 2 ? 'play' : 'reach', ms: 420, flip: true });
-        play(steps, () => { burst('sparkle', 4); setRest('sit'); });
+      case 'dance':
+        if (moving()) stop('stand');
+        pet.queue = [];
+        for (let i = 0; i < 6; i++) pet.queue.push({ pose: i % 2 ? 'play' : 'reach', ms: 420, flip: true });
         break;
-      }
       case 'meow':
-        if (pet.mode !== 'move' && pet.rest !== 'sit') setRest('sit');
+        if (!moving() && !pet.anim && pet.rest !== 'sit') settle('sit');
         pet.meowUntil = performance.now() + 1200;
         meowSound();
         break;
       case 'good':
-        trick('play', 1800);
+        if (!moving()) trick('play', 1800);
         burst('heart', 5);
         burst('sparkle', 2);
         break;
       case 'come': {
         let x = VW / 2;
         try { x = (await bridge.getCursor()).x; } catch (_) {}
-        startMove('run', x, 'sit');
+        startMove(Math.abs(x - pet.x) < 260 ? 'walk' : 'run', x, 'sit');
         break;
       }
     }
@@ -244,84 +336,83 @@
     } catch (_) {}
   }
 
-  // ---------- which drawing ----------
-  function currentImage() {
-    if (pet.seq.length) return pet.seq[0].img;
-    if (pet.air) return 'jump';
-    if (pet.temp) return pet.temp.pose;
-    if (pet.mode === 'move') return Math.abs(pet.v) > RUN_LOOK ? 'jump' : 'walk';
-    return restImg();
+  // ---------- what's on screen ----------
+  function visual() {
+    if (pet.anim) return { frame: curFrame() };
+    if (pet.hold) return { frame: pet.hold.frame };
+    if (pet.temp) return { pose: pet.temp.pose };
+    if (pet.rest === 'stand') return { frame: STAND };
+    if (pet.rest === 'lie') return { pose: 'bow' };
+    if (pet.rest === 'sit' && performance.now() < pet.meowUntil) return { pose: 'meow' };
+    return { pose: pet.rest };
   }
-  const imgSize = (n) => {
-    const b = Cat.images[n || currentImage()];
-    return b ? { w: b.width * S, h: b.height * S } : { w: 180, h: 160 };
-  };
-  const currentHeight = () => imgSize().h;
+  function bounds(vis = visual()) {
+    if (vis.frame != null) {
+      const m = ANIM.frames[vis.frame], st = ANIM.strips[m.strip];
+      return { w: m.w * st.K, h: (st.floor - m.oy) * st.K, lift: Math.max(0, (st.floor - (m.oy + m.h)) * st.K) };
+    }
+    const b = Cat.images[vis.pose];
+    return b ? { w: b.width * S, h: b.height * S, lift: 0 } : { w: 180, h: 160, lift: 0 };
+  }
+  const currentHeight = () => bounds().h;
+  const imgSize = () => bounds();
 
   // ---------- update ----------
   let last = performance.now();
-  let frozen = false;
   function update(now) {
-    if (frozen) { last = now; return; }
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now;
     pet.t += dt;
+    advanced = false;
 
-    // sequence steps
-    if (pet.seq.length) {
-      pet.seqT += dt * 1000;
-      if (pet.seqT >= pet.seq[0].ms) {
-        pet.seqT = 0;
-        const step = pet.seq.shift();
-        if (step.flip) pet.facing = -pet.facing;
-        if (!pet.seq.length && pet.seqDone) { const cb = pet.seqDone; pet.seqDone = null; cb(); }
+    if (pet.anim) {
+      const A = pet.anim;
+      A.acc += dt * A.fps;
+      while (pet.anim === A && A.acc >= 1) { A.acc -= 1; advance(); }
+      if (pet.anim) {
+        const f = curFrame();
+        pet.x += pet.facing * frameSpeed(f, pet.anim.ctx) * dt;
       }
     }
 
+    // steering while travelling
+    if (pet.gait && pet.anim && pet.target != null) {
+      const ahead = (pet.target - pet.x) * pet.facing;
+      if (pet.gait === 'walk' && pet.anim.ctx === 'walk' && ahead <= 2) arrive();
+      if (pet.gait === 'run' && pet.anim.ctx === 'bound' && !pet.braking) {
+        // distance still to cover before frame 92 ends, then the landing slide
+        const A = pet.anim;
+        let d = 0, k = A.i;
+        for (let n = 0; n < A.frames.length; n++) {
+          const f = A.frames[k];
+          d += frameSpeed(f, 'bound') / RUN_FPS;
+          if (f === 92) break;
+          k = (k + 1) % A.frames.length;
+        }
+        if (ahead <= d + LAND_DIST) pet.braking = true;
+      }
+    }
+    // never leave the screen
+    const EDGE = 140;
+    if (pet.x < EDGE || pet.x > VW - EDGE) {
+      pet.x = Math.max(EDGE, Math.min(VW - EDGE, pet.x));
+      if (pet.gait === 'run') pet.braking = true;
+      if (pet.gait === 'walk') arrive();
+    }
+
+    if (pet.hold && now > pet.hold.until) { const h = pet.hold; pet.hold = null; h.then(); }
+    if (pet.hold && pet.pendingRest) pet.hold.until = Math.min(pet.hold.until, now);
     if (pet.temp && now > pet.temp.until) pet.temp = null;
-
-    // movement: accelerate, cruise, brake, skid
-    if (pet.mode === 'move' && pet.target != null) {
-      const g = pet.gait === 'run' ? RUN : WALK;
-      const d = pet.target - pet.x;
-      const want = Math.sign(d) || pet.facing;
-      const sp = Math.abs(pet.v);
-      const stopDist = (sp * sp) / (2 * g.accel);
-      if (pet.v !== 0 && Math.sign(pet.v) !== want) {
-        // skidding: brake hard, then turn around with a squash
-        pet.v -= Math.sign(pet.v) * Math.min(sp, g.accel * 1.6 * dt);
-        if (pet.v === 0) { pet.facing = want; wobbleAt = now; }
-      } else if (Math.abs(d) <= stopDist + 2) {
-        pet.v -= want * Math.min(sp, g.accel * dt);
-      } else {
-        pet.v += want * g.accel * dt;
-        if (Math.abs(pet.v) > g.max) pet.v = want * g.max;
-      }
-      pet.x += pet.v * dt;
-      if (Math.abs(pet.v) > 1) pet.facing = Math.sign(pet.v);
-      pet.phase += (Math.abs(pet.v) * dt / (Math.abs(pet.v) > RUN_LOOK ? RUN.stride : WALK.stride)) * Math.PI * 2;
-
-      if ((Math.abs(d) < 3 && Math.abs(pet.v) < 25) || (Math.sign(pet.target - pet.x) !== want && Math.abs(pet.v) < 40)) {
-        pet.x = Math.abs(d) < 40 ? pet.target : pet.x;
-        pet.v = 0;
-        pet.target = null;
-        pet.mode = 'rest';
-        const after = pet.after;
-        pet.rest = 'stand';
-        if (after !== 'stand') play([{ img: 'stand', ms: 160 }], () => setRest(after));
-      }
+    if (!pet.temp && pet.queue.length && !moving() && !pet.anim) {
+      const q = pet.queue.shift();
+      if (q.flip) pet.facing = -pet.facing;
+      pet.temp = { pose: q.pose, until: now + q.ms };
+      if (!pet.queue.length) setTimeout(() => burst('sparkle', 4), q.ms);
     }
 
-    // airborne
-    if (pet.air) {
-      pet.vy -= 1900 * dt;
-      pet.y += pet.vy * dt;
-      if (pet.y <= 0) { pet.y = 0; pet.vy = 0; pet.air = false; wobbleAt = now; }
-    }
-
-    // nap when ignored
-    if (pet.mode === 'rest' && !pet.seq.length && !pet.temp && now - pet.lastCmdAt > 150000 && pet.rest !== 'sleep') setRest('sleep');
-    if (pet.rest === 'sleep' && pet.mode === 'rest' && !pet.temp && !pet.seq.length && Math.random() < dt * 0.8) burst('zed', 1);
+    const idle = now - pet.lastCmdAt;
+    if (!moving() && !pet.anim && !pet.hold && !pet.temp && idle > 150000 && pet.rest !== 'sleep') settle('sleep');
+    if (pet.rest === 'sleep' && !pet.anim && !pet.temp && Math.random() < dt * 0.8) burst('zed', 1);
 
     for (let i = particles.length - 1; i >= 0; i--) {
       const p = particles[i];
@@ -330,119 +421,76 @@
     }
   }
 
-  // ---------- rig + procedural motion ----------
+  // ---------- drawing ----------
   const sstep = (a, b, x) => { const k = Math.min(1, Math.max(0, (x - a) / (b - a))); return k * k * (3 - 2 * k); };
   function weight(u, v, part) {
     const [u0, v0, u1, v1] = part.box, f = 0.05;
     const m = sstep(u0 - f, u0 + f, u) * (1 - sstep(u1 - f, u1 + f, u)) * sstep(v0 - f, v0 + f, v) * (1 - sstep(v1 - f, v1 + f, v));
-    const r = Math.hypot(u - part.pivot[0], v - part.pivot[1]);
-    return m * sstep(0.0, 0.16, r);
+    return m * sstep(0.0, 0.16, Math.hypot(u - part.pivot[0], v - part.pivot[1]));
   }
 
-  // per-frame motion parameters for the drawing on screen
-  function motion(name, now) {
-    const t = pet.t, ph = pet.phase;
-    const m = { angles: {}, lift: 0, rot: 0, sx: 1, sy: 1, flex: 0, plant: false };
-    const A = m.angles;
-    const moving = pet.mode === 'move' && !pet.seq.length && !pet.air;
-    if (name === 'jump' && moving) {
-      // gallop: g = 0 stretched out (the drawing) … 1 fully gathered
-      const g = ((1 - Math.cos(ph)) / 2) * 1.15 - 0.15;
-      m.flex = g;
-      A.front = -0.62 * g;
-      A.hind = 0.5 * g;
-      A.tail = 0.2 * Math.sin(ph - 1.2);
-      A.head = 0.06 * Math.sin(ph);
-      m.lift = 12 * Math.max(0, Math.sin(ph + 0.4));
-      m.rot = -0.05 * Math.sin(ph) * pet.facing;
-    } else if (name === 'walk' && moving) {
-      A.front = 0.24 * Math.sin(ph);
-      A.hind = -0.24 * Math.sin(ph);
-      m.plant = true;
-      A.tail = 0.12 * Math.sin(ph * 0.5 + 0.6);
-      A.head = 0.035 * Math.sin(ph * 2);
-      m.lift = 2.5 * Math.abs(Math.sin(ph));
-    } else if (name === 'jump' && pet.air) {
-      const k = Math.max(-1, Math.min(1, pet.vy / 700));
-      A.front = -0.35 * k;
-      A.hind = 0.3 * k;
-      A.tail = -0.2 * k;
-      m.rot = -0.22 * k * pet.facing;
-    } else if (name === 'sleep') {
+  function squash(now) {
+    let sx = 1, sy = 1;
+    const w = (now - wobbleAt) / 1000;
+    if (w < 0.5) {
+      const e = Math.exp(-7 * w) * Math.cos(12 * w);
+      sy *= 1 - 0.06 * e; sx *= 1 + 0.035 * e;
+    }
+    return { sx, sy };
+  }
+
+  function placeFrame(f, now) {
+    const m = ANIM.frames[f], st = ANIM.strips[m.strip], K = st.K;
+    const flip = pet.facing > 0 ? -1 : 1;   // video frames face left
+    let { sx, sy } = squash(now);
+    if (!pet.anim && !pet.hold && f === STAND) sy *= 1 + 0.01 * Math.sin(pet.t * 2.1);
+    if (pet.hold) sy *= 1 + 0.012 * Math.sin(pet.t * 2.4);
+    const gy = groundY();
+    return (u, v) => {
+      const vx = m.ox + u * m.w, vy = m.oy + v * m.h;
+      return [pet.x + (vx - m.bx) * K * flip * sx, gy + (vy - st.floor) * K * sy];
+    };
+  }
+
+  function placePose(name, now) {
+    const bmp = Cat.images[name], P = Cat.POSES[name];
+    const W = bmp.width, H = bmp.height, ax = P.anchor * W;
+    const flip = (P.face === 'left' && pet.facing > 0) || (P.face === 'right' && pet.facing < 0);
+    const t = pet.t, A = {};
+    let lift = 0, rot = 0, sx = 1, sy = 1;
+    if (name === 'sleep') {
       A.tail = 0.03 * Math.sin(t * 0.8);
-      m.sy = 1 + 0.025 * Math.sin(t * 1.3);
-      m.sx = 1 - 0.008 * Math.sin(t * 1.3);
+      sy = 1 + 0.025 * Math.sin(t * 1.3); sx = 1 - 0.008 * Math.sin(t * 1.3);
     } else if (name === 'play') {
-      A.paws = 0.2 * Math.sin(t * 7);
-      A.tail = 0.16 * Math.sin(t * 5);
-      m.rot = 0.06 * Math.sin(t * 3.5);
+      A.paws = 0.2 * Math.sin(t * 7); A.tail = 0.16 * Math.sin(t * 5); rot = 0.06 * Math.sin(t * 3.5);
     } else if (name === 'reach') {
-      A.tail = 0.12 * Math.sin(t * 2.4);
-      A.head = 0.04 * Math.sin(t * 2.4 + 1);
-      m.lift = 3 * Math.abs(Math.sin(t * 2.4));
+      A.tail = 0.12 * Math.sin(t * 2.4); A.head = 0.04 * Math.sin(t * 2.4 + 1); lift = 3 * Math.abs(Math.sin(t * 2.4));
     } else {
-      // resting: slow tail swish with the odd flick, breathing, a head tilt
       const flick = Math.pow(Math.max(0, Math.sin(t * 0.45)), 24) * 0.25;
       A.tail = 0.08 * Math.sin(t * 1.6) + 0.03 * Math.sin(t * 3.3) + flick * Math.sin(t * 9);
       A.head = 0.035 * Math.sin(t * 0.8 + 1);
       if (name === 'meow') A.head = -0.09 * Math.sin(Math.min(1, (pet.meowUntil - now) / 1200) * Math.PI);
-      m.sy = 1 + 0.012 * Math.sin(t * 2.1);
+      sy = 1 + 0.012 * Math.sin(t * 2.1);
     }
-
-    // transition shaping: crouch (wind-up) and squash-and-settle after cuts
-    const step = pet.seq[0];
-    if (step && step.crouch) {
-      const k = sstep(0, 1, pet.seqT / step.ms);
-      m.sy *= 1 - 0.13 * k; m.sx *= 1 + 0.07 * k;
-    }
-    const w = (now - wobbleAt) / 1000;
-    if (w < 0.6) {
-      const e = Math.exp(-6 * w) * Math.cos(11 * w);
-      m.sy *= 1 - 0.1 * e; m.sx *= 1 + 0.06 * e;
-    }
-    return m;
-  }
-
-  function placeFor(name, now) {
-    const bmp = Cat.images[name];
-    const P = Cat.POSES[name];
-    const W = bmp.width, H = bmp.height;
-    const ax = P.anchor * W;
-    const flip = (P.face === 'left' && pet.facing > 0) || (P.face === 'right' && pet.facing < 0);
-    const m = motion(name, now);
-    const parts = Object.entries(P.parts || {}).filter(([k]) => m.angles[k]);
-    const lift = pet.y + m.lift;
-    lastLift = m.lift;
-    const baseY = VH - GROUND - lift;
-    const cr = Math.cos(m.rot), sr = Math.sin(m.rot);
+    const q = squash(now); sx *= q.sx; sy *= q.sy;
+    const parts = Object.entries(P.parts || {}).filter(([k]) => A[k]);
+    const baseY = groundY() - lift;
+    const cr = Math.cos(rot), sr = Math.sin(rot);
     return (u, v) => {
       let X = u * W, Y = v * H;
       for (const [k, part] of parts) {
         const wgt = weight(u, v, part);
         if (wgt <= 0) continue;
-        const a = m.angles[k] * wgt;
-        const px = part.pivot[0] * W, py = part.pivot[1] * H;
+        const a = A[k] * wgt, px = part.pivot[0] * W, py = part.pivot[1] * H;
         const dx = X - px, dy = Y - py, c = Math.cos(a), s = Math.sin(a);
-        X = px + dx * c - dy * s;
-        Y = py + dx * s + dy * c;
+        X = px + dx * c - dy * s; Y = py + dx * s + dy * c;
       }
-      if (m.plant) {
-        // keep paws + painted ground line on the floor while legs swing
-        const k = sstep(0.9, 0.97, v);
-        Y = Y + (v * H - Y) * k;
-      }
-      if (m.flex) {
-        // spine gathers (shorter, arched) and stretches with the stride
-        X -= (u - 0.45) * W * 0.09 * m.flex;
-        Y -= H * 0.05 * Math.sin(Math.PI * Math.min(1, Math.max(0, (u - 0.08) / 0.78))) * m.flex * (1 - 0.6 * v);
-      }
-      let lx = (X - ax) * S * m.sx, ly = (Y - H) * S * m.sy;
+      let lx = (X - ax) * S * sx, ly = (Y - H) * S * sy;
       if (flip) lx = -lx;
       return [pet.x + lx * cr - ly * sr, baseY + lx * sr + ly * cr];
     };
   }
 
-  // ---------- 2D bits: shadow + particles ----------
   function star(x, y, r, a, spin) {
     fctx.save();
     fctx.globalAlpha = a; fctx.translate(x, y); fctx.rotate(spin * 0.15);
@@ -466,25 +514,26 @@
   }
 
   function draw(now) {
-    const name = currentImage();
-    if (name !== shownImg) { if (shownImg) wobbleAt = now; shownImg = name; }
+    const vis = visual();
+    const key = vis.frame != null ? 'f' + vis.frame : 'p' + vis.pose;
+    if (key !== lastKey) { if (!advanced && lastKey) wobbleAt = now; lastKey = key; }
 
     mesh.begin(VW, VH);
-    if (Cat.images[name]) mesh.draw(Cat.images[name], placeFor(name, now));
+    if (vis.frame != null && Cat.frames[vis.frame]) mesh.draw(Cat.frames[vis.frame], placeFrame(vis.frame, now));
+    else if (vis.pose && Cat.images[vis.pose]) mesh.draw(Cat.images[vis.pose], placePose(vis.pose, now));
 
-    const { w } = imgSize(name);
-    const air = pet.y + lastLift;
-    const shrink = Math.max(0.45, 1 - air / 220);
+    const b = bounds(vis);
+    const shrink = Math.max(0.45, 1 - b.lift / 220);
     sctx.clearRect(0, 0, VW, VH);
     sctx.fillStyle = 'rgba(120, 100, 160, 0.16)';
     sctx.beginPath();
-    sctx.ellipse(pet.x, VH - GROUND - 1, w * 0.36 * shrink, 6 * shrink, 0, 0, Math.PI * 2);
+    sctx.ellipse(pet.x, groundY() - 1, Math.min(b.w, 260) * 0.36 * shrink, 6 * shrink, 0, 0, Math.PI * 2);
     sctx.fill();
 
     fctx.clearRect(0, 0, VW, VH);
     for (const p of particles) {
       const a = Math.max(0, 1 - p.age / p.life);
-      const sy = VH - GROUND - p.y;
+      const sy = groundY() - p.y;
       if (p.kind === 'heart') heart(p.x, sy, 1.6, a);
       else if (p.kind === 'sparkle') star(p.x, sy, 9 + 4 * Math.sin(p.age * 6), a, p.spin + p.age * 4);
       else {
@@ -506,7 +555,7 @@
   Cat.ready.then(() => requestAnimationFrame(loop));
 
   // for the test harness
-  window.__mochi = { pet, execute, freeze: (on) => { frozen = on; } };
+  window.__mochi = { pet, execute };
 
   // ---------- speech bubble ----------
   const bubble = document.getElementById('bubble');
@@ -517,7 +566,7 @@
   function positionBubble() {
     const x = Math.max(170, Math.min(VW - 170, pet.x));
     bubble.style.left = `${x}px`;
-    bubble.style.bottom = `${GROUND + currentHeight() + 16 + pet.y + lastLift}px`;
+    bubble.style.bottom = `${GROUND + currentHeight() + 16}px`;
   }
 
   const esc = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
@@ -648,8 +697,8 @@
   let overCat = false;
   window.addEventListener('mousemove', (e) => {
     const { w, h } = imgSize();
-    const top = VH - GROUND - h - pet.y;
-    const inside = Math.abs(e.clientX - pet.x) < w * 0.38 && e.clientY > top + h * 0.15 && e.clientY < top + h;
+    const top = groundY() - h;
+    const inside = Math.abs(e.clientX - pet.x) < Math.min(w, 260) * 0.38 && e.clientY > top + h * 0.15 && e.clientY < groundY();
     if (inside !== overCat) {
       overCat = inside;
       bridge.setIgnoreMouse(!inside);
@@ -658,7 +707,7 @@
   });
   window.addEventListener('mousedown', () => {
     if (!overCat) return;
-    if (pet.rest === 'sleep' && pet.mode === 'rest') setRest('sit');
+    if (pet.rest === 'sleep' && !pet.anim) settle('sit');
     burst('heart', 4);
     showBubble('purrrr ♥', '', 1200);
   });

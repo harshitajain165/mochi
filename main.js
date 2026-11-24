@@ -116,9 +116,11 @@ ipcMain.handle('cursor', () => {
 });
 
 // Pose images for the WebGL renderer (read here so the page gets plain bytes).
-ipcMain.handle('read-asset', (_e, name) => {
-  const file = path.join(__dirname, 'renderer', 'cats', path.basename(String(name)));
-  return fs.readFileSync(file);
+ipcMain.handle('read-asset', (_e, rel) => {
+  // only files inside renderer/cats or renderer/anim
+  const [dir, name] = String(rel).split('/');
+  if (!['cats', 'anim'].includes(dir) || !name) throw new Error('bad asset path');
+  return fs.readFileSync(path.join(__dirname, 'renderer', dir, path.basename(name)));
 });
 
 ipcMain.handle('get-status', () => ({ ...lastStatus, muted, showHud }));
