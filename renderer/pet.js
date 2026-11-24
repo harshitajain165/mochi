@@ -36,7 +36,7 @@
     t: 0,
     frameT: 0, frame: 0,
     lastCmdAt: performance.now(),
-    meowUntil: 0,
+    meow: null,
     happyUntil: 0,
     dance: null,
   };
@@ -101,11 +101,7 @@
       case 'jump': if (pet.pose !== 'run' && pet.pose !== 'walk') pet.pose = 'stand'; hop(); break;
       case 'turn': pet.dir = -pet.dir; if (pet.target != null) runAcross(pet.dir); break;
       case 'dance': pet.target = null; pet.pose = 'stand'; pet.dance = { t: 0, step: 0 }; break;
-      case 'meow':
-        if (pet.pose === 'sleep') pet.pose = 'lie';
-        pet.meowUntil = performance.now() + 1100;
-        meowSound();
-        break;
+      case 'meow': doMeow(); break;
       case 'good':
         pet.happyUntil = performance.now() + 1800;
         burst('heart', 6);
@@ -120,26 +116,124 @@
     }
   }
 
-  // ---------- tiny synthesized meow (no audio files) ----------
+  // ---------- kitten meow (synthesized, no audio files) ----------
+  // A little voice model: a buzzy pitch source shaped by three moving
+  // "formant" filters, so it says "m-ia-ow" instead of beeping. The pitch
+  // rises and falls with a touch of vibrato, there's a breath of air on top,
+  // and each meow picks a variant so it never sounds canned.
   let actx = null;
+  const VOWEL = {             // formant frequencies (Hz) for an adult voice
+    m: [280, 1700, 2600], i: [330, 2500, 3200], a: [820, 1450, 2700], o: [480, 900, 2500], r: [460, 1250, 1900],
+  };
+  const MEOWS = {
+    mew:  { dur: 0.34, pitch: [880, 1220, 840], path: [['m', 0], ['i', 0.18], ['a', 0.65], ['o', 1]], size: 1.38, mouth: [[0.15, 0.9]], text: 'mew~' },
+    meow: { dur: 0.66, pitch: [700, 1060, 560], path: [['m', 0], ['i', 0.14], ['a', 0.5], ['o', 0.88]], size: 1.28, mouth: [[0.12, 0.88]], text: 'meeow ♡' },
+    mrrp: { dur: 0.46, pitch: [600, 960, 900], path: [['r', 0], ['r', 0.4], ['i', 0.7], ['a', 1]], size: 1.32, trill: 0.45, mouth: [[0.45, 0.95]], text: 'mrrp?' },
+  };
+
+  function voice(v, t0, out) {
+    const ctx = actx, d = v.dur;
+    const src = ctx.createOscillator();
+    src.type = 'sawtooth';
+    const [p0, p1, p2] = v.pitch.map((p) => p * (0.94 + Math.random() * 0.12));
+    src.frequency.setValueAtTime(p0, t0);
+    src.frequency.linearRampToValueAtTime(p1, t0 + d * 0.35);
+    src.frequency.exponentialRampToValueAtTime(p2, t0 + d);
+    // vibrato that blooms in after the onset
+    const lfo = ctx.createOscillator(), lfoG = ctx.createGain();
+    lfo.frequency.value = 6.5 + Math.random();
+    lfoG.gain.setValueAtTime(0, t0);
+    lfoG.gain.linearRampToValueAtTime(p1 * 0.025, t0 + d * 0.6);
+    lfo.connect(lfoG).connect(src.frequency);
+    // soften the buzz a little
+    const soft = ctx.createBiquadFilter();
+    soft.type = 'lowpass'; soft.frequency.value = 4200;
+    src.connect(soft);
+
+    // three formants following the vowel path
+    const amp = ctx.createGain();
+    amp.gain.value = 0;
+    const gains = [1.0, 0.55, 0.22];
+    for (let k = 0; k < 3; k++) {
+      const f = ctx.createBiquadFilter();
+      f.type = 'bandpass'; f.Q.value = k === 0 ? 5 : 8;
+      for (const [name, at] of v.path) {
+        const hz = VOWEL[name][k] * v.size;
+        if (at === 0) f.frequency.setValueAtTime(hz, t0);
+        else f.frequency.linearRampToValueAtTime(hz, t0 + d * at);
+      }
+      const g = ctx.createGain(); g.gain.value = gains[k];
+      soft.connect(f).connect(g).connect(amp);
+    }
+
+    // breathy air
+    const noise = ctx.createBufferSource();
+    const buf = ctx.createBuffer(1, Math.ceil(ctx.sampleRate * d), ctx.sampleRate);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < ch.length; i++) ch[i] = Math.random() * 2 - 1;
+    noise.buffer = buf;
+    const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 3500;
+    const ng = ctx.createGain(); ng.gain.value = 0.025;
+    noise.connect(hp).connect(ng).connect(amp);
+
+    // loudness: soft nasal "m", open up, fade away
+    const A = amp.gain;
+    A.setValueAtTime(0.0001, t0);
+    A.linearRampToValueAtTime(0.12, t0 + 0.04);
+    A.linearRampToValueAtTime(0.42, t0 + d * 0.22);
+    A.setValueAtTime(0.42, t0 + d * 0.6);
+    A.exponentialRampToValueAtTime(0.0001, t0 + d);
+    // "mrrp": a rolled trill at the start
+    if (v.trill) {
+      const tr = ctx.createOscillator(), trg = ctx.createGain();
+      tr.type = 'square'; tr.frequency.value = 26;
+      trg.gain.setValueAtTime(0.35, t0);
+      trg.gain.linearRampToValueAtTime(0, t0 + d * v.trill);
+      tr.connect(trg).connect(A);
+      tr.start(t0); tr.stop(t0 + d);
+    }
+    amp.connect(out);
+    for (const n of [src, lfo, noise]) { n.start(t0); n.stop(t0 + d + 0.05); }
+  }
+
+  // plays a meow; returns { ms, mouth: [[startMs, endMs]], text }
   function meowSound() {
+    const names = ['meow', 'meow', 'mew', 'mrrp'];
+    const v = MEOWS[names[Math.floor(Math.random() * names.length)]];
+    const twice = v === MEOWS.mew && Math.random() < 0.5;   // sometimes "mew mew"
+    const plan = { ms: 0, mouth: [], text: twice ? 'mew mew!' : v.text };
     try {
       actx = actx || new AudioContext();
-      const now = actx.currentTime;
-      const o = actx.createOscillator();
-      const g = actx.createGain();
-      const f = actx.createBiquadFilter();
-      o.type = 'sawtooth';
-      o.frequency.setValueAtTime(520, now);
-      o.frequency.linearRampToValueAtTime(820, now + 0.12);
-      o.frequency.linearRampToValueAtTime(420, now + 0.45);
-      f.type = 'bandpass'; f.frequency.value = 1400; f.Q.value = 2;
-      g.gain.setValueAtTime(0.0001, now);
-      g.gain.exponentialRampToValueAtTime(0.18, now + 0.05);
-      g.gain.exponentialRampToValueAtTime(0.0001, now + 0.5);
-      o.connect(f).connect(g).connect(actx.destination);
-      o.start(now); o.stop(now + 0.55);
-    } catch (_) {}
+      if (actx.state === 'suspended') actx.resume();
+      const out = actx.createGain();
+      out.gain.value = 0.85;
+      const comp = actx.createDynamicsCompressor();
+      out.connect(comp).connect(actx.destination);
+      const t0 = actx.currentTime + 0.02;
+      const reps = twice ? 2 : 1;
+      for (let r = 0; r < reps; r++) {
+        const start = r * (v.dur + 0.09);
+        voice(v, t0 + start, out);
+        for (const [a, b] of v.mouth) plan.mouth.push([(start + v.dur * a) * 1000, (start + v.dur * b) * 1000]);
+        plan.ms = (start + v.dur) * 1000;
+      }
+    } catch (_) {
+      plan.ms = 600; plan.mouth = [[80, 520]];
+    }
+    return plan;
+  }
+
+  function doMeow() {
+    if (pet.pose === 'sleep' || pet.pose === 'lie') pet.pose = 'sit';
+    const plan = meowSound();
+    const now = performance.now();
+    pet.meow = { start: now, ...plan };
+    pet.happyUntil = Math.max(pet.happyUntil, now + plan.ms + 650);   // happy squint after
+    if (pet.target == null && pet.y === 0 && (pet.pose === 'sit' || pet.pose === 'stand')) { hop(210); pet.smallHop = true; }
+    // a little note + floating "mew" text, then a heart
+    burst('note', 1);
+    particles.push({ kind: 'text', text: plan.text, x: pet.x + pet.dir * 120, y: CAT_H * 0.7, vx: pet.dir * 12, vy: 38, life: 1.6, age: 0 });
+    setTimeout(() => burst('heart', 1), plan.ms);
   }
 
   // ---------- update loop ----------
@@ -181,7 +275,7 @@
     if (pet.y > 0) {
       pet.vy -= 1900 * dt;
       pet.y += pet.vy * dt;
-      if (pet.y <= 0) { pet.y = 0; pet.vy = 0; }
+      if (pet.y <= 0) { pet.y = 0; pet.vy = 0; pet.smallHop = false; }
     }
 
     // animation frames
@@ -226,11 +320,20 @@
   function draw(now) {
     ctx.clearRect(0, 0, VW, VH);
 
-    const pose = pet.y > 0 && pet.pose !== 'run' ? 'jump' : pet.pose;
+    const pose = pet.y > 0 && pet.pose !== 'run' && !pet.smallHop ? 'jump' : pet.pose;
+    let mouthOpen = false, tilt = 0;
+    if (pet.meow) {
+      const e = now - pet.meow.start;
+      if (e > pet.meow.ms + 250) pet.meow = null;
+      else {
+        mouthOpen = pet.meow.mouth.some(([a, b]) => e >= a && e <= b);
+        tilt = 0.07 * Math.sin(Math.PI * Math.min(1, e / (pet.meow.ms + 250)));
+      }
+    }
     const opts = {
       closed: now < blinkUntil && pose !== 'sleep',
-      mouthOpen: now < pet.meowUntil,
-      happy: now < pet.happyUntil,
+      mouthOpen,
+      happy: now < pet.happyUntil && !mouthOpen,
     };
     if (opts.happy) opts.closed = false;
     const sprite = Sprite.render(pose, pet.t, pet.frame, opts);
@@ -246,6 +349,10 @@
     ctx.fill();
 
     ctx.save();
+    // head-tilt while meowing: rotate a touch around the paws
+    ctx.translate(pet.x, top + CAT_H);
+    ctx.rotate(-tilt * pet.dir);
+    ctx.translate(-pet.x, -(top + CAT_H));
     if (pet.dir < 0) {
       ctx.translate(left + CAT_W, top);
       ctx.scale(-1, 1);
@@ -260,6 +367,16 @@
       const a = Math.max(0, 1 - p.age / p.life);
       const sy = VH - GROUND - p.y;
       if (p.kind === 'heart') drawGlyph(Sprite.HEART, p.x, sy, 4, '#ff5c8a', a);
+      else if (p.kind === 'note') drawGlyph(Sprite.NOTE, p.x + pet.dir * 40, sy - 20, 4, '#8a6fd1', a);
+      else if (p.kind === 'text') {
+        ctx.save();
+        ctx.globalAlpha = a;
+        ctx.font = '700 16px ui-monospace, "SF Mono", Menlo, monospace';
+        ctx.textAlign = 'center';
+        ctx.lineWidth = 4; ctx.strokeStyle = '#fffaf3'; ctx.strokeText(p.text, p.x, sy);
+        ctx.fillStyle = '#c2457a'; ctx.fillText(p.text, p.x, sy);
+        ctx.restore();
+      }
       else drawGlyph(Sprite.ZED, p.x + pet.dir * 70, sy - 30, 3 + p.age * 1.5, '#7e7796', a);
     }
 

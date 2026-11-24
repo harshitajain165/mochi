@@ -295,5 +295,14 @@ const Sprite = (() => {
     '#####',
   ];
 
-  return { W, H, render, HEART, ZED, colors: C };
+  const NOTE = [
+    '..###',
+    '..#.#',
+    '..#..',
+    '..#..',
+    '###..',
+    '###..',
+  ];
+
+  return { W, H, render, HEART, ZED, NOTE, colors: C };
 })();
