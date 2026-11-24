@@ -55,7 +55,9 @@ If you say more than one command, the last one wins ("sit… no, run!" → it ru
 - `main.js` opens the WebSocket to `wss://api.smallest.ai/waves/v1/stt/live?model=pulse` (16 kHz linear16) with your key in the `Authorization` header. The key never reaches the page.
 - `renderer/pcm-worklet.js` captures the mic at 16 kHz and sends 50 ms PCM chunks to the main process over IPC.
 - `renderer/commands.js` holds the command words. Edit it to add tricks.
-- `renderer/cat.js` lists Mochi's poses. Each is a PNG in `renderer/cats/`, cut out of the character sheet `art-reference.png`. `renderer/pet.js` animates them with breathing, bounding, bobbing and soft crossfades.
+- `renderer/cat.js` lists Mochi's poses (PNGs in `renderer/cats/`, cut from the character sheet `art-reference.png`) and a small rig for each: where the tail, head and legs are and where they bend.
+- `renderer/gl.js` draws each pose as a bendable WebGL mesh, so tails swish, legs swing and the spine flexes without extra drawings.
+- `renderer/pet.js` runs the motion: a gallop cycle for running, alternating legs for walking, acceleration and braking, and a transition sequencer (crouch before sprinting, slow to a walk before stopping, sleep → sit → stand) with squash-and-settle on every pose change.
 
 ## Demo tips
 

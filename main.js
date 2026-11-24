@@ -115,6 +115,12 @@ ipcMain.handle('cursor', () => {
   return { x: p.x - b.x, y: p.y - b.y };
 });
 
+// Pose images for the WebGL renderer (read here so the page gets plain bytes).
+ipcMain.handle('read-asset', (_e, name) => {
+  const file = path.join(__dirname, 'renderer', 'cats', path.basename(String(name)));
+  return fs.readFileSync(file);
+});
+
 ipcMain.handle('get-status', () => ({ ...lastStatus, muted, showHud }));
 
 // ---------- window ----------

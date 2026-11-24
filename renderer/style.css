@@ -10,18 +10,21 @@ html, body {
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 
-#stage {
+#shadow, #stage, #fx {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
-  z-index: 2;
+  pointer-events: none;
 }
+#shadow { z-index: 1; }
+#stage { z-index: 2; }
+#fx { z-index: 3; }
 
 /* ---------- speech bubble above the cat ---------- */
 #bubble {
   position: absolute;
-  z-index: 3;
+  z-index: 4;
   bottom: 170px;
   left: 0;
   transform: translateX(-50%);

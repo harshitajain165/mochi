@@ -1,84 +1,159 @@
 // Mochi — renderer: mic capture → main (→ Smallest Pulse), command
-// handling, the cat's little state machine, and drawing.
+// handling, Mochi's movement + transition state machine, and drawing.
+//
+// The poses are still drawings, so the motion comes from three things:
+//  1. a rig: tails, heads and legs bend on a WebGL mesh (cat.js, gl.js)
+//  2. procedural cycles: the run is a gallop (spine flexes, legs gather and
+//     reach, suspension arc), the walk swings front/hind legs alternately
+//  3. a transition sequencer: hard cuts with squash-and-settle instead of
+//     crossfades, crouch before sprinting, braking/skids before stopping,
+//     and "via" poses (sleep → sit → stand) so changes read as movement.
 
 (() => {
   const bridge = window.petBridge;
-  const S = 0.85;                        // art scale (sheet px → screen px)
-  const GROUND = 12;                     // px from window bottom to paws
-  const RUN_SPEED = 560;                 // px/s
-  const WALK_SPEED = 95;
-  const TEMP_MS = 2600;                  // how long one-off tricks last
+  const S = 0.85;                 // art scale (sheet px → screen px)
+  const GROUND = 12;              // px from window bottom to paws
+  const RUN = { max: 520, accel: 1500, stride: 170 };
+  const WALK = { max: 90, accel: 320, stride: 70 };
+  const RUN_LOOK = 170;           // above this speed, show the gallop
+  const TEMP_MS = 2600;           // one-off tricks
+  const MARGIN = 120;
 
-  // ---------- canvas ----------
-  const stage = document.getElementById('stage');
-  const ctx = stage.getContext('2d');
+  // ---------- canvases: shadow (2D) < cat (WebGL) < fx (2D) ----------
+  const shadowCv = document.getElementById('shadow');
+  const glCv = document.getElementById('stage');
+  const fxCv = document.getElementById('fx');
+  const sctx = shadowCv.getContext('2d');
+  const fctx = fxCv.getContext('2d');
+  const mesh = MeshGL.create(glCv);
   let VW = 0, VH = 0, DPR = 1;
   function resize() {
     DPR = window.devicePixelRatio || 1;
     VW = window.innerWidth; VH = window.innerHeight;
-    stage.width = Math.round(VW * DPR);
-    stage.height = Math.round(VH * DPR);
-    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
+    for (const cv of [shadowCv, glCv, fxCv]) {
+      cv.width = Math.round(VW * DPR);
+      cv.height = Math.round(VH * DPR);
+    }
+    sctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    fctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   }
   window.addEventListener('resize', resize);
   resize();
 
-  // ---------- pet state ----------
-  // pose: stand | sit | lie | sleep | walk | run | stretch | play | reach | back
+  // ---------- state ----------
   const pet = {
     x: VW * 0.62,
-    dir: -1,             // 1 = facing right, -1 = left
-    pose: 'sit',
-    rest: 'sit',         // pose to return to after a one-off trick
-    temp: null,          // { pose, until }
+    v: 0,                 // signed speed, px/s
+    facing: -1,           // 1 = right, -1 = left
+    mode: 'rest',         // 'rest' | 'move'
+    rest: 'sit',          // stand | sit | lie | sleep
+    gait: 'run',          // run | walk (while moving)
     target: null,
     after: 'stand',
-    y: 0, vy: 0,
-    t: 0,
+    seq: [],              // queued in-between steps: { img, ms, crouch, flip }
+    seqT: 0,
+    seqDone: null,
+    temp: null,           // one-off trick { pose, until }
+    y: 0, vy: 0, air: false,
+    t: 0, phase: 0,
     lastCmdAt: performance.now(),
     meowUntil: 0,
-    dance: null,
   };
   const particles = [];
-  const RESTING = new Set(['stand', 'sit', 'lie', 'sleep']);
+  let wobbleAt = -1e9;    // when the last hard cut happened (for squash & settle)
+  let shownImg = null;
+  let lastLift = 0;
 
-  const halfW = () => ((Cat.images[currentImage()] || {}).width || 200) * S / 2;
-  const clampX = (x) => Math.max(110, Math.min(VW - 110, x));
+  const clampX = (x) => Math.max(MARGIN, Math.min(VW - MARGIN, x));
+  const dirTo = (x) => (x >= pet.x ? 1 : -1);
 
-  function setPose(p) {
-    pet.temp = null;
-    pet.pose = p;
-    if (RESTING.has(p)) pet.rest = p;
+  // ---------- sequencer ----------
+  function play(steps, done) {
+    pet.seq = steps.slice();
+    pet.seqT = 0;
+    pet.seqDone = done || null;
+  }
+  function clearSeq() { pet.seq = []; pet.seqDone = null; }
+
+  // what's on screen right now, before any trick/sequence
+  function restImg() {
+    if (pet.rest === 'lie') return 'bow';
+    if (pet.rest === 'sit' && performance.now() < pet.meowUntil) return 'meow';
+    return pet.rest;
   }
 
-  function trick(p, ms = TEMP_MS) {
-    pet.target = null;
-    pet.temp = { pose: p, until: performance.now() + ms };
+  // in-between pose to get up from a resting pose
+  function getUpSteps() {
+    if (pet.mode === 'move') return [];
+    if (pet.rest === 'sleep') return [{ img: 'sit', ms: 170 }, { img: 'stand', ms: 130 }];
+    if (pet.rest === 'sit' || pet.rest === 'lie') return [{ img: 'stand', ms: 140 }];
+    return [];
   }
 
-  function moveTo(x, speedPose, after = 'stand') {
+  function setRest(pose) {
+    clearSeq();
     pet.temp = null;
-    pet.target = clampX(x);
-    pet.dir = pet.target >= pet.x ? 1 : -1;
-    pet.pose = speedPose;
+    const from = pet.rest;
+    pet.rest = pose;
+    if (pet.mode === 'move') return;
+    // via poses so big changes don't teleport
+    if (from === 'sleep' && pose === 'stand') play([{ img: 'sit', ms: 160 }]);
+    else if (from === 'stand' && pose === 'sleep') play([{ img: 'sit', ms: 200 }, { img: 'bow', ms: 160 }]);
+    else if (from === 'sit' && pose === 'sleep') play([{ img: 'bow', ms: 180 }]);
+  }
+
+  function trick(pose, ms = TEMP_MS) {
+    if (pet.mode === 'move') stopSoon();
+    pet.temp = { pose, until: performance.now() + ms };
+  }
+
+  function startMove(gait, x, after = 'stand') {
+    pet.temp = null;
     pet.after = after;
+    const tx = clampX(x);
+    if (Math.abs(tx - pet.x) < 8) return;
+    if (pet.mode === 'move') {          // already moving: just retarget
+      pet.gait = gait;
+      pet.target = tx;
+      return;
+    }
+    const d = dirTo(tx);
+    const steps = getUpSteps();
+    if (d !== pet.facing) steps.push({ img: steps.length ? steps[steps.length - 1].img : (pet.rest === 'stand' ? 'stand' : 'stand'), ms: 90, flip: true });
+    if (gait === 'run') steps.push({ img: 'bow', ms: 170, crouch: true });   // wind-up
+    play(steps, () => {
+      pet.mode = 'move';
+      pet.gait = gait;
+      pet.target = tx;
+      pet.facing = d;
+    });
   }
 
   function runAcross(dir) {
-    const margin = 110;
     if (dir == null) {
-      dir = pet.dir;
-      if ((dir > 0 && pet.x > VW - margin - 150) || (dir < 0 && pet.x < margin + 150)) dir = -dir;
+      dir = pet.facing;
+      if ((dir > 0 && pet.x > VW - MARGIN - 150) || (dir < 0 && pet.x < MARGIN + 150)) dir = -dir;
     }
-    moveTo(dir > 0 ? VW - margin : margin, 'run');
+    startMove('run', dir > 0 ? VW - MARGIN : MARGIN);
   }
 
-  function hop(power = 560) {
-    if (pet.y > 0) return;
-    pet.vy = power;
-    pet.y = 0.01;
+  // brake to a natural stop from the current speed
+  function stopSoon(after = 'stand') {
+    if (pet.mode !== 'move') return;
+    const g = pet.gait === 'run' ? RUN : WALK;
+    const dist = (pet.v * pet.v) / (2 * g.accel);
+    pet.target = clampX(pet.x + Math.sign(pet.v || pet.facing) * dist);
+    pet.after = after;
+  }
+
+  function hop(power = 600) {
+    if (pet.air) return;
+    const crouchImg = pet.mode === 'move' ? null : (pet.rest === 'stand' ? 'stand' : null);
+    const launch = () => { pet.air = true; pet.vy = power; pet.y = 0.01; };
+    if (pet.mode === 'move') { launch(); return; }
+    const steps = getUpSteps();
+    steps.push({ img: crouchImg || 'stand', ms: 110, crouch: true });
+    play(steps, () => { pet.rest = 'stand'; launch(); });
   }
 
   function burst(kind, n) {
@@ -97,34 +172,39 @@
     }
   }
 
-  // ---------- command execution ----------
+  // ---------- commands ----------
   async function execute(cmd) {
     pet.lastCmdAt = performance.now();
-    pet.dance = null;
-    const moving = pet.pose === 'run' || pet.pose === 'walk';
     switch (cmd) {
-      case 'sit': pet.target = null; setPose('sit'); break;
+      case 'sit': if (pet.mode === 'move') stopSoon('sit'); else setRest('sit'); break;
       case 'stand':
-      case 'wake': pet.target = null; setPose('stand'); break;
-      case 'lie': pet.target = null; setPose('lie'); break;
-      case 'sleep': pet.target = null; setPose('sleep'); break;
-      case 'stop': pet.target = null; if (moving || pet.temp) setPose('stand'); break;
+      case 'wake': if (pet.mode === 'move') stopSoon('stand'); else setRest('stand'); break;
+      case 'lie': if (pet.mode === 'move') stopSoon('lie'); else setRest('lie'); break;
+      case 'sleep': if (pet.mode === 'move') stopSoon('sleep'); else setRest('sleep'); break;
+      case 'stop': if (pet.mode === 'move') stopSoon('stand'); else { pet.temp = null; clearSeq(); } break;
       case 'run': runAcross(); break;
       case 'run_left': runAcross(-1); break;
       case 'run_right': runAcross(1); break;
-      case 'walk': moveTo(pet.x + pet.dir * 380, 'walk'); break;
-      case 'jump': if (!moving) setPose('stand'); hop(); break;
+      case 'walk': startMove('walk', pet.x + pet.facing * 380); break;
+      case 'jump': hop(); break;
       case 'stretch': trick('stretch'); break;
       case 'play': trick('play'); burst('sparkle', 3); break;
       case 'reach': trick('reach'); break;
       case 'turn':
-        pet.dir = -pet.dir;
-        if (pet.target != null) runAcross(pet.dir);
-        else if (pet.pose === 'sit' || pet.pose === 'stand') trick('back', 1600);
+        if (pet.mode === 'move') startMove(pet.gait, pet.facing > 0 ? MARGIN : VW - MARGIN, pet.after);
+        else if (pet.rest === 'sit' || pet.rest === 'stand') { pet.facing = -pet.facing; trick('back', 1500); }
+        else pet.facing = -pet.facing;
         break;
-      case 'dance': pet.target = null; setPose('stand'); pet.dance = { t: 0, step: 0 }; break;
+      case 'dance': {
+        if (pet.mode === 'move') stopSoon('stand');
+        pet.temp = null;
+        const steps = [];
+        for (let i = 0; i < 6; i++) steps.push({ img: i % 2 ? 'play' : 'reach', ms: 420, flip: true });
+        play(steps, () => { burst('sparkle', 4); setRest('sit'); });
+        break;
+      }
       case 'meow':
-        if (pet.pose === 'sleep') setPose('sit');
+        if (pet.mode !== 'move' && pet.rest !== 'sit') setRest('sit');
         pet.meowUntil = performance.now() + 1200;
         meowSound();
         break;
@@ -134,10 +214,9 @@
         burst('sparkle', 2);
         break;
       case 'come': {
-        try {
-          const c = await bridge.getCursor();
-          moveTo(c.x, 'run', 'sit');
-        } catch (_) { moveTo(VW / 2, 'run', 'sit'); }
+        let x = VW / 2;
+        try { x = (await bridge.getCursor()).x; } catch (_) {}
+        startMove('run', x, 'sit');
         break;
       }
     }
@@ -165,183 +244,257 @@
     } catch (_) {}
   }
 
-  // ---------- which drawing to show ----------
-  function currentImage(now = performance.now()) {
+  // ---------- which drawing ----------
+  function currentImage() {
+    if (pet.seq.length) return pet.seq[0].img;
+    if (pet.air) return 'jump';
     if (pet.temp) return pet.temp.pose;
-    if (pet.pose === 'run' || pet.y > 0) return 'jump';
-    if (pet.pose === 'walk') return 'walk';
-    if (pet.pose === 'lie') return 'bow';
-    if (pet.pose === 'sleep') return 'sleep';
-    if (pet.pose === 'sit' && now < pet.meowUntil) return 'meow';
-    return pet.pose;               // stand | sit
+    if (pet.mode === 'move') return Math.abs(pet.v) > RUN_LOOK ? 'jump' : 'walk';
+    return restImg();
   }
-  const currentHeight = () => ((Cat.images[currentImage()] || {}).height || 180) * S;
+  const imgSize = (n) => {
+    const b = Cat.images[n || currentImage()];
+    return b ? { w: b.width * S, h: b.height * S } : { w: 180, h: 160 };
+  };
+  const currentHeight = () => imgSize().h;
 
-  // ---------- update loop ----------
+  // ---------- update ----------
   let last = performance.now();
+  let frozen = false;
   function update(now) {
+    if (frozen) { last = now; return; }
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now;
     pet.t += dt;
 
-    if (pet.temp && now > pet.temp.until) { pet.temp = null; pet.pose = pet.rest; }
-
-    if (pet.dance) {
-      pet.dance.t += dt;
-      if (pet.dance.t > 0.45) {
-        pet.dance.t = 0;
-        pet.dance.step++;
-        const seq = ['reach', 'play', 'reach', 'stand'];
-        pet.dir = -pet.dir;
-        pet.temp = { pose: seq[pet.dance.step % seq.length], until: now + 450 };
-        if (pet.dance.step % 2 === 0) hop(360);
-        if (pet.dance.step === 4) burst('sparkle', 4);
-        if (pet.dance.step >= 8) { pet.dance = null; pet.temp = null; setPose('sit'); }
+    // sequence steps
+    if (pet.seq.length) {
+      pet.seqT += dt * 1000;
+      if (pet.seqT >= pet.seq[0].ms) {
+        pet.seqT = 0;
+        const step = pet.seq.shift();
+        if (step.flip) pet.facing = -pet.facing;
+        if (!pet.seq.length && pet.seqDone) { const cb = pet.seqDone; pet.seqDone = null; cb(); }
       }
     }
 
-    if (pet.target != null) {
-      const speed = pet.pose === 'walk' ? WALK_SPEED : RUN_SPEED;
+    if (pet.temp && now > pet.temp.until) pet.temp = null;
+
+    // movement: accelerate, cruise, brake, skid
+    if (pet.mode === 'move' && pet.target != null) {
+      const g = pet.gait === 'run' ? RUN : WALK;
       const d = pet.target - pet.x;
-      const step = speed * dt;
-      if (Math.abs(d) <= step) {
-        pet.x = pet.target;
-        pet.target = null;
-        setPose(pet.after);
+      const want = Math.sign(d) || pet.facing;
+      const sp = Math.abs(pet.v);
+      const stopDist = (sp * sp) / (2 * g.accel);
+      if (pet.v !== 0 && Math.sign(pet.v) !== want) {
+        // skidding: brake hard, then turn around with a squash
+        pet.v -= Math.sign(pet.v) * Math.min(sp, g.accel * 1.6 * dt);
+        if (pet.v === 0) { pet.facing = want; wobbleAt = now; }
+      } else if (Math.abs(d) <= stopDist + 2) {
+        pet.v -= want * Math.min(sp, g.accel * dt);
       } else {
-        pet.dir = Math.sign(d);
-        pet.x += pet.dir * step;
+        pet.v += want * g.accel * dt;
+        if (Math.abs(pet.v) > g.max) pet.v = want * g.max;
+      }
+      pet.x += pet.v * dt;
+      if (Math.abs(pet.v) > 1) pet.facing = Math.sign(pet.v);
+      pet.phase += (Math.abs(pet.v) * dt / (Math.abs(pet.v) > RUN_LOOK ? RUN.stride : WALK.stride)) * Math.PI * 2;
+
+      if ((Math.abs(d) < 3 && Math.abs(pet.v) < 25) || (Math.sign(pet.target - pet.x) !== want && Math.abs(pet.v) < 40)) {
+        pet.x = Math.abs(d) < 40 ? pet.target : pet.x;
+        pet.v = 0;
+        pet.target = null;
+        pet.mode = 'rest';
+        const after = pet.after;
+        pet.rest = 'stand';
+        if (after !== 'stand') play([{ img: 'stand', ms: 160 }], () => setRest(after));
       }
     }
 
-    if (pet.y > 0) {
+    // airborne
+    if (pet.air) {
       pet.vy -= 1900 * dt;
       pet.y += pet.vy * dt;
-      if (pet.y <= 0) { pet.y = 0; pet.vy = 0; }
+      if (pet.y <= 0) { pet.y = 0; pet.vy = 0; pet.air = false; wobbleAt = now; }
     }
 
-    const idle = now - pet.lastCmdAt;
-    if (pet.target == null && !pet.dance && !pet.temp && idle > 150000 && pet.pose !== 'sleep') setPose('sleep');
-
-    if (pet.pose === 'sleep' && !pet.temp && Math.random() < dt * 0.8) burst('zed', 1);
+    // nap when ignored
+    if (pet.mode === 'rest' && !pet.seq.length && !pet.temp && now - pet.lastCmdAt > 150000 && pet.rest !== 'sleep') setRest('sleep');
+    if (pet.rest === 'sleep' && pet.mode === 'rest' && !pet.temp && !pet.seq.length && Math.random() < dt * 0.8) burst('zed', 1);
 
     for (let i = particles.length - 1; i >= 0; i--) {
       const p = particles[i];
-      p.age += dt;
-      p.x += p.vx * dt;
-      p.y += p.vy * dt;
+      p.age += dt; p.x += p.vx * dt; p.y += p.vy * dt;
       if (p.age > p.life) particles.splice(i, 1);
     }
   }
 
-  // ---------- draw ----------
-  let shownImg = null, prevImg = null, changedAt = 0, prevFlip = false;
+  // ---------- rig + procedural motion ----------
+  const sstep = (a, b, x) => { const k = Math.min(1, Math.max(0, (x - a) / (b - a))); return k * k * (3 - 2 * k); };
+  function weight(u, v, part) {
+    const [u0, v0, u1, v1] = part.box, f = 0.05;
+    const m = sstep(u0 - f, u0 + f, u) * (1 - sstep(u1 - f, u1 + f, u)) * sstep(v0 - f, v0 + f, v) * (1 - sstep(v1 - f, v1 + f, v));
+    const r = Math.hypot(u - part.pivot[0], v - part.pivot[1]);
+    return m * sstep(0.0, 0.16, r);
+  }
 
-  function drawCat(name, alpha, pop, now) {
-    const img = Cat.images[name];
-    if (!img) return null;
-    const meta = Cat.POSES[name];
-    const w = img.width * S, h = img.height * S;
-    const flip = (meta.face === 'left' && pet.dir > 0) || (meta.face === 'right' && pet.dir < 0);
-
-    // per-pose life: breathing, bobbing, bounding
-    let lift = pet.y, rot = 0, sx = 1, sy = 1;
-    const t = pet.t;
-    if (pet.pose === 'run' && !pet.temp) {
-      const ph = Math.abs(Math.sin(t * 10));
-      lift += ph * 18;
-      rot = (Math.cos(t * 10) * 0.05) * (flip ? -1 : 1);
-      sy = 0.96 + ph * 0.06; sx = 1.04 - ph * 0.05;
-    } else if (name === 'walk') {
-      lift += Math.abs(Math.sin(t * 7)) * 3;
-      rot = Math.sin(t * 7) * 0.018;
-    } else if (name === 'play') {
-      rot = Math.sin(t * 7) * 0.09;
+  // per-frame motion parameters for the drawing on screen
+  function motion(name, now) {
+    const t = pet.t, ph = pet.phase;
+    const m = { angles: {}, lift: 0, rot: 0, sx: 1, sy: 1, flex: 0, plant: false };
+    const A = m.angles;
+    const moving = pet.mode === 'move' && !pet.seq.length && !pet.air;
+    if (name === 'jump' && moving) {
+      // gallop: g = 0 stretched out (the drawing) … 1 fully gathered
+      const g = ((1 - Math.cos(ph)) / 2) * 1.15 - 0.15;
+      m.flex = g;
+      A.front = -0.62 * g;
+      A.hind = 0.5 * g;
+      A.tail = 0.2 * Math.sin(ph - 1.2);
+      A.head = 0.06 * Math.sin(ph);
+      m.lift = 12 * Math.max(0, Math.sin(ph + 0.4));
+      m.rot = -0.05 * Math.sin(ph) * pet.facing;
+    } else if (name === 'walk' && moving) {
+      A.front = 0.24 * Math.sin(ph);
+      A.hind = -0.24 * Math.sin(ph);
+      m.plant = true;
+      A.tail = 0.12 * Math.sin(ph * 0.5 + 0.6);
+      A.head = 0.035 * Math.sin(ph * 2);
+      m.lift = 2.5 * Math.abs(Math.sin(ph));
+    } else if (name === 'jump' && pet.air) {
+      const k = Math.max(-1, Math.min(1, pet.vy / 700));
+      A.front = -0.35 * k;
+      A.hind = 0.3 * k;
+      A.tail = -0.2 * k;
+      m.rot = -0.22 * k * pet.facing;
     } else if (name === 'sleep') {
-      sy = 1 + Math.sin(t * 1.5) * 0.025; sx = 1 - Math.sin(t * 1.5) * 0.01;
+      A.tail = 0.03 * Math.sin(t * 0.8);
+      m.sy = 1 + 0.025 * Math.sin(t * 1.3);
+      m.sx = 1 - 0.008 * Math.sin(t * 1.3);
+    } else if (name === 'play') {
+      A.paws = 0.2 * Math.sin(t * 7);
+      A.tail = 0.16 * Math.sin(t * 5);
+      m.rot = 0.06 * Math.sin(t * 3.5);
     } else if (name === 'reach') {
-      lift += Math.abs(Math.sin(t * 3)) * 4;
+      A.tail = 0.12 * Math.sin(t * 2.4);
+      A.head = 0.04 * Math.sin(t * 2.4 + 1);
+      m.lift = 3 * Math.abs(Math.sin(t * 2.4));
     } else {
-      sy = 1 + Math.sin(t * 2.2) * 0.012;
+      // resting: slow tail swish with the odd flick, breathing, a head tilt
+      const flick = Math.pow(Math.max(0, Math.sin(t * 0.45)), 24) * 0.25;
+      A.tail = 0.08 * Math.sin(t * 1.6) + 0.03 * Math.sin(t * 3.3) + flick * Math.sin(t * 9);
+      A.head = 0.035 * Math.sin(t * 0.8 + 1);
+      if (name === 'meow') A.head = -0.09 * Math.sin(Math.min(1, (pet.meowUntil - now) / 1200) * Math.PI);
+      m.sy = 1 + 0.012 * Math.sin(t * 2.1);
     }
-    sx *= pop; sy *= pop;
 
+    // transition shaping: crouch (wind-up) and squash-and-settle after cuts
+    const step = pet.seq[0];
+    if (step && step.crouch) {
+      const k = sstep(0, 1, pet.seqT / step.ms);
+      m.sy *= 1 - 0.13 * k; m.sx *= 1 + 0.07 * k;
+    }
+    const w = (now - wobbleAt) / 1000;
+    if (w < 0.6) {
+      const e = Math.exp(-6 * w) * Math.cos(11 * w);
+      m.sy *= 1 - 0.1 * e; m.sx *= 1 + 0.06 * e;
+    }
+    return m;
+  }
+
+  function placeFor(name, now) {
+    const bmp = Cat.images[name];
+    const P = Cat.POSES[name];
+    const W = bmp.width, H = bmp.height;
+    const ax = P.anchor * W;
+    const flip = (P.face === 'left' && pet.facing > 0) || (P.face === 'right' && pet.facing < 0);
+    const m = motion(name, now);
+    const parts = Object.entries(P.parts || {}).filter(([k]) => m.angles[k]);
+    const lift = pet.y + m.lift;
+    lastLift = m.lift;
     const baseY = VH - GROUND - lift;
-    ctx.save();
-    ctx.globalAlpha = alpha;
-    ctx.translate(pet.x, baseY);
-    ctx.rotate(rot);
-    ctx.scale(flip ? -sx : sx, sy);
-    ctx.drawImage(img, -w / 2, -h, w, h);
-    ctx.restore();
-    return { w, h };
+    const cr = Math.cos(m.rot), sr = Math.sin(m.rot);
+    return (u, v) => {
+      let X = u * W, Y = v * H;
+      for (const [k, part] of parts) {
+        const wgt = weight(u, v, part);
+        if (wgt <= 0) continue;
+        const a = m.angles[k] * wgt;
+        const px = part.pivot[0] * W, py = part.pivot[1] * H;
+        const dx = X - px, dy = Y - py, c = Math.cos(a), s = Math.sin(a);
+        X = px + dx * c - dy * s;
+        Y = py + dx * s + dy * c;
+      }
+      if (m.plant) {
+        // keep paws + painted ground line on the floor while legs swing
+        const k = sstep(0.9, 0.97, v);
+        Y = Y + (v * H - Y) * k;
+      }
+      if (m.flex) {
+        // spine gathers (shorter, arched) and stretches with the stride
+        X -= (u - 0.45) * W * 0.09 * m.flex;
+        Y -= H * 0.05 * Math.sin(Math.PI * Math.min(1, Math.max(0, (u - 0.08) / 0.78))) * m.flex * (1 - 0.6 * v);
+      }
+      let lx = (X - ax) * S * m.sx, ly = (Y - H) * S * m.sy;
+      if (flip) lx = -lx;
+      return [pet.x + lx * cr - ly * sr, baseY + lx * sr + ly * cr];
+    };
   }
 
-  function star(x, y, r, color, a, spin) {
-    ctx.save();
-    ctx.globalAlpha = a;
-    ctx.translate(x, y);
-    ctx.rotate(spin * 0.15);
-    ctx.fillStyle = color;
-    ctx.beginPath();
+  // ---------- 2D bits: shadow + particles ----------
+  function star(x, y, r, a, spin) {
+    fctx.save();
+    fctx.globalAlpha = a; fctx.translate(x, y); fctx.rotate(spin * 0.15);
+    fctx.fillStyle = '#ec7fb0';
+    fctx.beginPath();
     for (let i = 0; i < 8; i++) {
-      const rr = i % 2 === 0 ? r : r * 0.22;
-      const ang = (i * Math.PI) / 4 - Math.PI / 2;
-      ctx.lineTo(Math.cos(ang) * rr, Math.sin(ang) * rr);
+      const rr = i % 2 === 0 ? r : r * 0.22, ang = (i * Math.PI) / 4 - Math.PI / 2;
+      fctx.lineTo(Math.cos(ang) * rr, Math.sin(ang) * rr);
     }
-    ctx.closePath();
-    ctx.fill();
-    ctx.restore();
+    fctx.closePath(); fctx.fill(); fctx.restore();
   }
-
   function heart(x, y, s, a) {
-    ctx.save();
-    ctx.globalAlpha = a;
-    ctx.translate(x, y);
-    ctx.scale(s, s);
-    ctx.fillStyle = '#ec7fb0';
-    ctx.beginPath();
-    ctx.moveTo(0, 4);
-    ctx.bezierCurveTo(-7, -2, -4, -9, 0, -5);
-    ctx.bezierCurveTo(4, -9, 7, -2, 0, 4);
-    ctx.fill();
-    ctx.restore();
+    fctx.save();
+    fctx.globalAlpha = a; fctx.translate(x, y); fctx.scale(s, s);
+    fctx.fillStyle = '#ec7fb0';
+    fctx.beginPath();
+    fctx.moveTo(0, 4);
+    fctx.bezierCurveTo(-7, -2, -4, -9, 0, -5);
+    fctx.bezierCurveTo(4, -9, 7, -2, 0, 4);
+    fctx.fill(); fctx.restore();
   }
 
   function draw(now) {
-    ctx.clearRect(0, 0, VW, VH);
-    const name = currentImage(now);
-    if (name !== shownImg) { prevImg = shownImg; shownImg = name; changedAt = now; }
-    const k = Math.min(1, (now - changedAt) / 170);
-    const ease = 1 - Math.pow(1 - k, 3);
+    const name = currentImage();
+    if (name !== shownImg) { if (shownImg) wobbleAt = now; shownImg = name; }
 
-    // soft lavender shadow, like the sheet's
-    const img = Cat.images[name];
-    const w = img ? img.width * S : 160;
-    const shrink = Math.max(0.45, 1 - pet.y / 260);
-    ctx.fillStyle = 'rgba(120, 100, 160, 0.16)';
-    ctx.beginPath();
-    ctx.ellipse(pet.x, VH - GROUND - 1, w * 0.38 * shrink, 6 * shrink, 0, 0, Math.PI * 2);
-    ctx.fill();
+    mesh.begin(VW, VH);
+    if (Cat.images[name]) mesh.draw(Cat.images[name], placeFor(name, now));
 
-    if (prevImg && k < 1) drawCat(prevImg, 1 - ease, 1, now);
-    drawCat(name, prevImg ? ease : 1, 0.94 + 0.06 * ease, now);
+    const { w } = imgSize(name);
+    const air = pet.y + lastLift;
+    const shrink = Math.max(0.45, 1 - air / 220);
+    sctx.clearRect(0, 0, VW, VH);
+    sctx.fillStyle = 'rgba(120, 100, 160, 0.16)';
+    sctx.beginPath();
+    sctx.ellipse(pet.x, VH - GROUND - 1, w * 0.36 * shrink, 6 * shrink, 0, 0, Math.PI * 2);
+    sctx.fill();
 
+    fctx.clearRect(0, 0, VW, VH);
     for (const p of particles) {
       const a = Math.max(0, 1 - p.age / p.life);
       const sy = VH - GROUND - p.y;
       if (p.kind === 'heart') heart(p.x, sy, 1.6, a);
-      else if (p.kind === 'sparkle') star(p.x, sy, 9 + 4 * Math.sin(p.age * 6), '#ec7fb0', a, p.spin + p.age * 4);
+      else if (p.kind === 'sparkle') star(p.x, sy, 9 + 4 * Math.sin(p.age * 6), a, p.spin + p.age * 4);
       else {
-        ctx.save();
-        ctx.globalAlpha = a;
-        ctx.fillStyle = '#7a6aa8';
-        ctx.font = `600 ${14 + p.age * 8}px ui-rounded, "SF Pro Rounded", system-ui, sans-serif`;
-        ctx.fillText('z', p.x + pet.dir * 40, sy - 10);
-        ctx.restore();
+        fctx.save();
+        fctx.globalAlpha = a; fctx.fillStyle = '#7a6aa8';
+        fctx.font = `600 ${14 + p.age * 8}px ui-rounded, "SF Pro Rounded", system-ui, sans-serif`;
+        fctx.fillText('z', p.x + pet.facing * 40, sy - 10);
+        fctx.restore();
       }
     }
-
     positionBubble();
   }
 
@@ -352,6 +505,9 @@
   }
   Cat.ready.then(() => requestAnimationFrame(loop));
 
+  // for the test harness
+  window.__mochi = { pet, execute, freeze: (on) => { frozen = on; } };
+
   // ---------- speech bubble ----------
   const bubble = document.getElementById('bubble');
   const bubbleText = document.getElementById('bubble-text');
@@ -361,7 +517,7 @@
   function positionBubble() {
     const x = Math.max(170, Math.min(VW - 170, pet.x));
     bubble.style.left = `${x}px`;
-    bubble.style.bottom = `${GROUND + currentHeight() + 16 + pet.y}px`;
+    bubble.style.bottom = `${GROUND + currentHeight() + 16 + pet.y + lastLift}px`;
   }
 
   const esc = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
@@ -491,9 +647,9 @@
   // ---------- mouse: click-through except over the cat ----------
   let overCat = false;
   window.addEventListener('mousemove', (e) => {
-    const h = currentHeight();
+    const { w, h } = imgSize();
     const top = VH - GROUND - h - pet.y;
-    const inside = Math.abs(e.clientX - pet.x) < halfW() * 0.75 && e.clientY > top + h * 0.15 && e.clientY < top + h;
+    const inside = Math.abs(e.clientX - pet.x) < w * 0.38 && e.clientY > top + h * 0.15 && e.clientY < top + h;
     if (inside !== overCat) {
       overCat = inside;
       bridge.setIgnoreMouse(!inside);
@@ -502,7 +658,7 @@
   });
   window.addEventListener('mousedown', () => {
     if (!overCat) return;
-    if (pet.pose === 'sleep') setPose('sit');
+    if (pet.rest === 'sleep' && pet.mode === 'rest') setRest('sit');
     burst('heart', 4);
     showBubble('purrrr ♥', '', 1200);
   });
