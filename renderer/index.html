@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self' 'unsafe-inline'">
+  <title>Pixel Pet</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <canvas id="stage"></canvas>
+
+  <div id="bubble" class="hidden">
+    <div id="bubble-text"></div>
+    <div id="bubble-meta"></div>
+  </div>
+
+  <div id="hud">
+    <div id="hud-row">
+      <span id="dot"></span>
+      <span id="hud-status">Starting…</span>
+      <span id="meter"><span id="meter-fill"></span></span>
+    </div>
+    <div id="hud-heard"></div>
+  </div>
+
+  <script src="sprites.js"></script>
+  <script src="commands.js"></script>
+  <script src="pet.js"></script>
+</body>
+</html>
