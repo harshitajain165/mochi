@@ -1,14 +1,13 @@
-// Pixel Pet — renderer: mic capture → main (→ Smallest Pulse), command
+// Mochi — renderer: mic capture → main (→ Smallest Pulse), command
 // handling, the cat's little state machine, and drawing.
 
 (() => {
   const bridge = window.petBridge;
-  const SCALE = 4;                       // screen pixels per sprite pixel
-  const CAT_W = Sprite.W * SCALE;
-  const CAT_H = Sprite.H * SCALE;
-  const GROUND = 10;                     // px from bottom of window to paws
-  const RUN_SPEED = 620;                 // px/s
-  const WALK_SPEED = 110;
+  const S = 0.85;                        // art scale (sheet px → screen px)
+  const GROUND = 12;                     // px from window bottom to paws
+  const RUN_SPEED = 560;                 // px/s
+  const WALK_SPEED = 95;
+  const TEMP_MS = 2600;                  // how long one-off tricks last
 
   // ---------- canvas ----------
   const stage = document.getElementById('stage');
@@ -20,32 +19,47 @@
     stage.width = Math.round(VW * DPR);
     stage.height = Math.round(VH * DPR);
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-    ctx.imageSmoothingEnabled = false;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
   }
   window.addEventListener('resize', resize);
   resize();
 
   // ---------- pet state ----------
+  // pose: stand | sit | lie | sleep | walk | run | stretch | play | reach | back
   const pet = {
-    x: VW * 0.62,        // centre x on screen
+    x: VW * 0.62,
     dir: -1,             // 1 = facing right, -1 = left
-    pose: 'stand',
-    target: null,        // x to move to (run/walk)
-    after: 'stand',      // pose to settle into after moving
-    y: 0, vy: 0,         // jump height (px, up is positive)
+    pose: 'sit',
+    rest: 'sit',         // pose to return to after a one-off trick
+    temp: null,          // { pose, until }
+    target: null,
+    after: 'stand',
+    y: 0, vy: 0,
     t: 0,
-    frameT: 0, frame: 0,
     lastCmdAt: performance.now(),
     meowUntil: 0,
-    happyUntil: 0,
     dance: null,
   };
-  let blinkUntil = 0, nextBlink = performance.now() + 2500;
   const particles = [];
+  const RESTING = new Set(['stand', 'sit', 'lie', 'sleep']);
 
-  const clampX = (x) => Math.max(CAT_W / 2 + 8, Math.min(VW - CAT_W / 2 - 8, x));
+  const halfW = () => ((Cat.images[currentImage()] || {}).width || 200) * S / 2;
+  const clampX = (x) => Math.max(110, Math.min(VW - 110, x));
+
+  function setPose(p) {
+    pet.temp = null;
+    pet.pose = p;
+    if (RESTING.has(p)) pet.rest = p;
+  }
+
+  function trick(p, ms = TEMP_MS) {
+    pet.target = null;
+    pet.temp = { pose: p, until: performance.now() + ms };
+  }
 
   function moveTo(x, speedPose, after = 'stand') {
+    pet.temp = null;
     pet.target = clampX(x);
     pet.dir = pet.target >= pet.x ? 1 : -1;
     pet.pose = speedPose;
@@ -53,31 +67,32 @@
   }
 
   function runAcross(dir) {
-    const margin = CAT_W / 2 + 8;
+    const margin = 110;
     if (dir == null) {
-      // keep going the way it's facing, unless it's already at that edge
       dir = pet.dir;
       if ((dir > 0 && pet.x > VW - margin - 150) || (dir < 0 && pet.x < margin + 150)) dir = -dir;
     }
     moveTo(dir > 0 ? VW - margin : margin, 'run');
   }
 
-  function hop(power = 520) {
+  function hop(power = 560) {
     if (pet.y > 0) return;
     pet.vy = power;
     pet.y = 0.01;
   }
 
   function burst(kind, n) {
+    const top = currentHeight();
     for (let i = 0; i < n; i++) {
       particles.push({
         kind,
-        x: pet.x + (Math.random() - 0.5) * 60 + pet.dir * 30,
-        y: CAT_H * 0.75 + Math.random() * 20,
+        x: pet.x + (Math.random() - 0.5) * 90,
+        y: top * (0.55 + Math.random() * 0.35),
         vx: (Math.random() - 0.5) * 30,
-        vy: 40 + Math.random() * 40,
-        life: 1.6 + Math.random() * 0.6,
+        vy: 35 + Math.random() * 40,
+        life: 1.5 + Math.random() * 0.8,
         age: 0,
+        spin: Math.random() * Math.PI,
       });
     }
   }
@@ -88,27 +103,35 @@
     pet.dance = null;
     const moving = pet.pose === 'run' || pet.pose === 'walk';
     switch (cmd) {
-      case 'sit': pet.target = null; pet.pose = 'sit'; break;
+      case 'sit': pet.target = null; setPose('sit'); break;
       case 'stand':
-      case 'wake': pet.target = null; pet.pose = 'stand'; break;
-      case 'lie': pet.target = null; pet.pose = 'lie'; break;
-      case 'sleep': pet.target = null; pet.pose = 'sleep'; break;
-      case 'stop': pet.target = null; if (moving || pet.pose === 'jump') pet.pose = 'stand'; break;
+      case 'wake': pet.target = null; setPose('stand'); break;
+      case 'lie': pet.target = null; setPose('lie'); break;
+      case 'sleep': pet.target = null; setPose('sleep'); break;
+      case 'stop': pet.target = null; if (moving || pet.temp) setPose('stand'); break;
       case 'run': runAcross(); break;
       case 'run_left': runAcross(-1); break;
       case 'run_right': runAcross(1); break;
       case 'walk': moveTo(pet.x + pet.dir * 380, 'walk'); break;
-      case 'jump': if (pet.pose !== 'run' && pet.pose !== 'walk') pet.pose = 'stand'; hop(); break;
-      case 'turn': pet.dir = -pet.dir; if (pet.target != null) runAcross(pet.dir); break;
-      case 'dance': pet.target = null; pet.pose = 'stand'; pet.dance = { t: 0, step: 0 }; break;
+      case 'jump': if (!moving) setPose('stand'); hop(); break;
+      case 'stretch': trick('stretch'); break;
+      case 'play': trick('play'); burst('sparkle', 3); break;
+      case 'reach': trick('reach'); break;
+      case 'turn':
+        pet.dir = -pet.dir;
+        if (pet.target != null) runAcross(pet.dir);
+        else if (pet.pose === 'sit' || pet.pose === 'stand') trick('back', 1600);
+        break;
+      case 'dance': pet.target = null; setPose('stand'); pet.dance = { t: 0, step: 0 }; break;
       case 'meow':
-        if (pet.pose === 'sleep') pet.pose = 'lie';
-        pet.meowUntil = performance.now() + 1100;
+        if (pet.pose === 'sleep') setPose('sit');
+        pet.meowUntil = performance.now() + 1200;
         meowSound();
         break;
       case 'good':
-        pet.happyUntil = performance.now() + 1800;
-        burst('heart', 6);
+        trick('play', 1800);
+        burst('heart', 5);
+        burst('sparkle', 2);
         break;
       case 'come': {
         try {
@@ -142,6 +165,18 @@
     } catch (_) {}
   }
 
+  // ---------- which drawing to show ----------
+  function currentImage(now = performance.now()) {
+    if (pet.temp) return pet.temp.pose;
+    if (pet.pose === 'run' || pet.y > 0) return 'jump';
+    if (pet.pose === 'walk') return 'walk';
+    if (pet.pose === 'lie') return 'bow';
+    if (pet.pose === 'sleep') return 'sleep';
+    if (pet.pose === 'sit' && now < pet.meowUntil) return 'meow';
+    return pet.pose;               // stand | sit
+  }
+  const currentHeight = () => ((Cat.images[currentImage()] || {}).height || 180) * S;
+
   // ---------- update loop ----------
   let last = performance.now();
   function update(now) {
@@ -149,20 +184,22 @@
     last = now;
     pet.t += dt;
 
-    // dance routine: hop + flip a few times
+    if (pet.temp && now > pet.temp.until) { pet.temp = null; pet.pose = pet.rest; }
+
     if (pet.dance) {
       pet.dance.t += dt;
-      if (pet.dance.t > 0.35) {
+      if (pet.dance.t > 0.45) {
         pet.dance.t = 0;
         pet.dance.step++;
+        const seq = ['reach', 'play', 'reach', 'stand'];
         pet.dir = -pet.dir;
-        if (pet.dance.step % 2 === 0) hop(380);
-        if (pet.dance.step === 4) burst('heart', 3);
-        if (pet.dance.step >= 8) pet.dance = null;
+        pet.temp = { pose: seq[pet.dance.step % seq.length], until: now + 450 };
+        if (pet.dance.step % 2 === 0) hop(360);
+        if (pet.dance.step === 4) burst('sparkle', 4);
+        if (pet.dance.step >= 8) { pet.dance = null; pet.temp = null; setPose('sit'); }
       }
     }
 
-    // movement
     if (pet.target != null) {
       const speed = pet.pose === 'walk' ? WALK_SPEED : RUN_SPEED;
       const d = pet.target - pet.x;
@@ -170,38 +207,24 @@
       if (Math.abs(d) <= step) {
         pet.x = pet.target;
         pet.target = null;
-        pet.pose = pet.after;
+        setPose(pet.after);
       } else {
         pet.dir = Math.sign(d);
         pet.x += pet.dir * step;
       }
     }
 
-    // jump physics
     if (pet.y > 0) {
       pet.vy -= 1900 * dt;
       pet.y += pet.vy * dt;
       if (pet.y <= 0) { pet.y = 0; pet.vy = 0; }
     }
 
-    // animation frames
-    const fps = pet.pose === 'run' ? 14 : pet.pose === 'walk' ? 7 : 4;
-    pet.frameT += dt;
-    if (pet.frameT > 1 / fps) { pet.frameT = 0; pet.frame++; }
-
-    // blinking
-    if (now > nextBlink) { blinkUntil = now + 140; nextBlink = now + 2200 + Math.random() * 3500; }
-
-    // get bored and nap if nobody talks to it for a while
     const idle = now - pet.lastCmdAt;
-    if (pet.target == null && !pet.dance) {
-      if (idle > 150000 && pet.pose !== 'sleep') pet.pose = 'sleep';
-    }
+    if (pet.target == null && !pet.dance && !pet.temp && idle > 150000 && pet.pose !== 'sleep') setPose('sleep');
 
-    // zzz
-    if (pet.pose === 'sleep' && Math.random() < dt * 0.9) burst('zed', 1);
+    if (pet.pose === 'sleep' && !pet.temp && Math.random() < dt * 0.8) burst('zed', 1);
 
-    // particles
     for (let i = particles.length - 1; i >= 0; i--) {
       const p = particles[i];
       p.age += dt;
@@ -212,55 +235,111 @@
   }
 
   // ---------- draw ----------
-  function drawGlyph(rows, x, y, s, color, alpha) {
-    ctx.globalAlpha = alpha;
-    ctx.fillStyle = color;
-    for (let j = 0; j < rows.length; j++) {
-      for (let i = 0; i < rows[j].length; i++) {
-        if (rows[j][i] === '#') ctx.fillRect(Math.round(x + i * s), Math.round(y + j * s), s, s);
-      }
+  let shownImg = null, prevImg = null, changedAt = 0, prevFlip = false;
+
+  function drawCat(name, alpha, pop, now) {
+    const img = Cat.images[name];
+    if (!img) return null;
+    const meta = Cat.POSES[name];
+    const w = img.width * S, h = img.height * S;
+    const flip = (meta.face === 'left' && pet.dir > 0) || (meta.face === 'right' && pet.dir < 0);
+
+    // per-pose life: breathing, bobbing, bounding
+    let lift = pet.y, rot = 0, sx = 1, sy = 1;
+    const t = pet.t;
+    if (pet.pose === 'run' && !pet.temp) {
+      const ph = Math.abs(Math.sin(t * 10));
+      lift += ph * 18;
+      rot = (Math.cos(t * 10) * 0.05) * (flip ? -1 : 1);
+      sy = 0.96 + ph * 0.06; sx = 1.04 - ph * 0.05;
+    } else if (name === 'walk') {
+      lift += Math.abs(Math.sin(t * 7)) * 3;
+      rot = Math.sin(t * 7) * 0.018;
+    } else if (name === 'play') {
+      rot = Math.sin(t * 7) * 0.09;
+    } else if (name === 'sleep') {
+      sy = 1 + Math.sin(t * 1.5) * 0.025; sx = 1 - Math.sin(t * 1.5) * 0.01;
+    } else if (name === 'reach') {
+      lift += Math.abs(Math.sin(t * 3)) * 4;
+    } else {
+      sy = 1 + Math.sin(t * 2.2) * 0.012;
     }
-    ctx.globalAlpha = 1;
+    sx *= pop; sy *= pop;
+
+    const baseY = VH - GROUND - lift;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(pet.x, baseY);
+    ctx.rotate(rot);
+    ctx.scale(flip ? -sx : sx, sy);
+    ctx.drawImage(img, -w / 2, -h, w, h);
+    ctx.restore();
+    return { w, h };
+  }
+
+  function star(x, y, r, color, a, spin) {
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.translate(x, y);
+    ctx.rotate(spin * 0.15);
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    for (let i = 0; i < 8; i++) {
+      const rr = i % 2 === 0 ? r : r * 0.22;
+      const ang = (i * Math.PI) / 4 - Math.PI / 2;
+      ctx.lineTo(Math.cos(ang) * rr, Math.sin(ang) * rr);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function heart(x, y, s, a) {
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.translate(x, y);
+    ctx.scale(s, s);
+    ctx.fillStyle = '#ec7fb0';
+    ctx.beginPath();
+    ctx.moveTo(0, 4);
+    ctx.bezierCurveTo(-7, -2, -4, -9, 0, -5);
+    ctx.bezierCurveTo(4, -9, 7, -2, 0, 4);
+    ctx.fill();
+    ctx.restore();
   }
 
   function draw(now) {
     ctx.clearRect(0, 0, VW, VH);
+    const name = currentImage(now);
+    if (name !== shownImg) { prevImg = shownImg; shownImg = name; changedAt = now; }
+    const k = Math.min(1, (now - changedAt) / 170);
+    const ease = 1 - Math.pow(1 - k, 3);
 
-    const pose = pet.y > 0 && pet.pose !== 'run' ? 'jump' : pet.pose;
-    const opts = {
-      closed: now < blinkUntil && pose !== 'sleep',
-      mouthOpen: now < pet.meowUntil,
-      happy: now < pet.happyUntil,
-    };
-    if (opts.happy) opts.closed = false;
-    const sprite = Sprite.render(pose, pet.t, pet.frame, opts);
-
-    const left = Math.round(pet.x - CAT_W / 2);
-    const top = Math.round(VH - GROUND - CAT_H - pet.y);
-
-    // shadow
-    const shrink = Math.max(0.4, 1 - pet.y / 300);
-    ctx.fillStyle = 'rgba(0,0,0,0.18)';
+    // soft lavender shadow, like the sheet's
+    const img = Cat.images[name];
+    const w = img ? img.width * S : 160;
+    const shrink = Math.max(0.45, 1 - pet.y / 260);
+    ctx.fillStyle = 'rgba(120, 100, 160, 0.16)';
     ctx.beginPath();
-    ctx.ellipse(pet.x, VH - GROUND - 2, 58 * shrink, 7 * shrink, 0, 0, Math.PI * 2);
+    ctx.ellipse(pet.x, VH - GROUND - 1, w * 0.38 * shrink, 6 * shrink, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.save();
-    if (pet.dir < 0) {
-      ctx.translate(left + CAT_W, top);
-      ctx.scale(-1, 1);
-      ctx.drawImage(sprite, 0, 0, CAT_W, CAT_H);
-    } else {
-      ctx.drawImage(sprite, left, top, CAT_W, CAT_H);
-    }
-    ctx.restore();
+    if (prevImg && k < 1) drawCat(prevImg, 1 - ease, 1, now);
+    drawCat(name, prevImg ? ease : 1, 0.94 + 0.06 * ease, now);
 
-    // particles
     for (const p of particles) {
       const a = Math.max(0, 1 - p.age / p.life);
       const sy = VH - GROUND - p.y;
-      if (p.kind === 'heart') drawGlyph(Sprite.HEART, p.x, sy, 4, '#ff5c8a', a);
-      else drawGlyph(Sprite.ZED, p.x + pet.dir * 50, sy - 20, 3 + p.age * 1.5, '#5b6cff', a);
+      if (p.kind === 'heart') heart(p.x, sy, 1.6, a);
+      else if (p.kind === 'sparkle') star(p.x, sy, 9 + 4 * Math.sin(p.age * 6), '#ec7fb0', a, p.spin + p.age * 4);
+      else {
+        ctx.save();
+        ctx.globalAlpha = a;
+        ctx.fillStyle = '#7a6aa8';
+        ctx.font = `600 ${14 + p.age * 8}px ui-rounded, "SF Pro Rounded", system-ui, sans-serif`;
+        ctx.fillText('z', p.x + pet.dir * 40, sy - 10);
+        ctx.restore();
+      }
     }
 
     positionBubble();
@@ -271,7 +350,7 @@
     draw(now);
     requestAnimationFrame(loop);
   }
-  requestAnimationFrame(loop);
+  Cat.ready.then(() => requestAnimationFrame(loop));
 
   // ---------- speech bubble ----------
   const bubble = document.getElementById('bubble');
@@ -282,7 +361,7 @@
   function positionBubble() {
     const x = Math.max(170, Math.min(VW - 170, pet.x));
     bubble.style.left = `${x}px`;
-    bubble.style.bottom = `${GROUND + CAT_H + 18 + pet.y}px`;
+    bubble.style.bottom = `${GROUND + currentHeight() + 16 + pet.y}px`;
   }
 
   const esc = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
@@ -422,8 +501,9 @@
   // ---------- mouse: click-through except over the cat ----------
   let overCat = false;
   window.addEventListener('mousemove', (e) => {
-    const top = VH - GROUND - CAT_H - pet.y;
-    const inside = Math.abs(e.clientX - pet.x) < CAT_W * 0.4 && e.clientY > top + CAT_H * 0.25 && e.clientY < top + CAT_H;
+    const h = currentHeight();
+    const top = VH - GROUND - h - pet.y;
+    const inside = Math.abs(e.clientX - pet.x) < halfW() * 0.75 && e.clientY > top + h * 0.15 && e.clientY < top + h;
     if (inside !== overCat) {
       overCat = inside;
       bridge.setIgnoreMouse(!inside);
@@ -432,11 +512,11 @@
   });
   window.addEventListener('mousedown', () => {
     if (!overCat) return;
-    if (pet.pose === 'sleep') pet.pose = 'sit';
-    execute('good');
+    if (pet.pose === 'sleep') setPose('sit');
+    burst('heart', 4);
     showBubble('purrrr ♥', '', 1200);
   });
 
   // say hi
-  setTimeout(() => showBubble('Hi! Try <span class="cmd">sit</span>, <span class="cmd">run</span>, <span class="cmd">jump</span>…', 'powered by Smallest Pulse', 4000), 600);
+  setTimeout(() => showBubble('Hi, I\'m Mochi! Try <span class="cmd">sit</span>, <span class="cmd">run</span>, <span class="cmd">stretch</span>…', 'powered by Smallest Pulse', 4200), 700);
 })();

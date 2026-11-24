@@ -1,7 +1,7 @@
 {
   "name": "mochi",
   "version": "1.0.0",
-  "description": "A pixel cat that lives on your screen and obeys voice commands, powered by Smallest AI Pulse speech-to-text.",
+  "description": "A hand-drawn fluffy cat that lives on your screen and obeys voice commands, powered by Smallest AI Pulse speech-to-text.",
   "main": "main.js",
   "scripts": {
     "start": "electron ."

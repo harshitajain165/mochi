@@ -1,6 +1,6 @@
-# Mochi: a pixel cat that listens 🐈
+# Mochi: a fluffy cat that listens 🐈
 
-A pixel cat that lives along the bottom of your screen and does what you tell it, using **Smallest AI Pulse** real-time speech-to-text.
+A hand-drawn fluffy cat that lives along the bottom of your screen and does what you tell it, using **Smallest AI Pulse** real-time speech-to-text.
 
 Built to show off Pulse on **short utterances**: commands fire on *interim* transcripts, so the cat often moves before you've finished the word. The bubble shows roughly how many ms after you stopped talking it reacted.
 
@@ -35,24 +35,27 @@ The cat appears along the bottom of your screen. macOS asks for microphone acces
 | **walk** | wanders a few steps |
 | **stop** / **stay** | stops where it is |
 | **jump** | hops |
-| **lie down** / **down** | lies down |
+| **lie down** / **down** | gets low with her head on her paws |
 | **sleep** / **wake up** | naps (Zzz) / wakes up |
 | **come here** | runs to your mouse cursor and sits |
-| **turn around** | flips direction |
+| **turn around** | flips direction (shows you her back if she's sitting) |
+| **stretch** | big stretch |
+| **play** / **roll over** | rolls onto her back |
+| **catch** / **high five** | paws at a butterfly |
 | **dance** | does a little dance |
 | **meow** / **speak** | meows |
-| **good kitty** | shows hearts |
+| **good kitty** | rolls over with hearts |
 
 If you say more than one command, the last one wins ("sit… no, run!" → it runs). Click the cat to pet it. The rest of the window is click-through, so it never blocks your apps.
 
-**Tray / menu-bar icon:** mute, hide the HUD, reconnect, quit. **⌘/Ctrl+Shift+M** mutes the mic.
+**Tray / menu-bar icon:**** mute, hide the HUD, reconnect, quit. **⌘/Ctrl+Shift+M** mutes the mic.
 
 ## How it works
 
 - `main.js` opens the WebSocket to `wss://api.smallest.ai/waves/v1/stt/live?model=pulse` (16 kHz linear16) with your key in the `Authorization` header. The key never reaches the page.
 - `renderer/pcm-worklet.js` captures the mic at 16 kHz and sends 50 ms PCM chunks to the main process over IPC.
 - `renderer/commands.js` holds the command words. Edit it to add tricks.
-- `renderer/sprites.js` draws the cat in code on a 44×32 pixel grid (no image files).
+- `renderer/cat.js` lists Mochi's poses. Each is a PNG in `renderer/cats/`, cut out of the character sheet `art-reference.png`. `renderer/pet.js` animates them with breathing, bounding, bobbing and soft crossfades.
 
 ## Demo tips
 
