@@ -3,12 +3,12 @@
 
 (() => {
   const bridge = window.petBridge;
-  const SCALE = 3;                       // screen pixels per sprite pixel (88×64 grid)
+  const SCALE = 2;                       // screen pixels per sprite pixel (88×64 grid)
   const CAT_W = Sprite.W * SCALE;
   const CAT_H = Sprite.H * SCALE;
   const GROUND = 10;                     // px from bottom of window to paws
-  const RUN_SPEED = 780;                 // px/s
-  const WALK_SPEED = 140;
+  const RUN_SPEED = 540;                 // px/s
+  const WALK_SPEED = 95;
 
   // ---------- canvas ----------
   const stage = document.getElementById('stage');
@@ -62,7 +62,7 @@
     moveTo(dir > 0 ? VW - margin : margin, 'run');
   }
 
-  function hop(power = 640) {
+  function hop(power = 525) {
     if (pet.y > 0) return;
     pet.vy = power;
     pet.y = 0.01;
@@ -97,7 +97,7 @@
       case 'run': runAcross(); break;
       case 'run_left': runAcross(-1); break;
       case 'run_right': runAcross(1); break;
-      case 'walk': moveTo(pet.x + pet.dir * 480, 'walk'); break;
+      case 'walk': moveTo(pet.x + pet.dir * 320, 'walk'); break;
       case 'jump': if (pet.pose !== 'run' && pet.pose !== 'walk') pet.pose = 'stand'; hop(); break;
       case 'turn': pet.dir = -pet.dir; if (pet.target != null) runAcross(pet.dir); break;
       case 'dance': pet.target = null; pet.pose = 'stand'; pet.dance = { t: 0, step: 0 }; break;
@@ -229,10 +229,10 @@
     const now = performance.now();
     pet.meow = { start: now, ...plan };
     pet.happyUntil = Math.max(pet.happyUntil, now + plan.ms + 650);   // happy squint after
-    if (pet.target == null && pet.y === 0 && (pet.pose === 'sit' || pet.pose === 'stand')) { hop(210); pet.smallHop = true; }
+    if (pet.target == null && pet.y === 0 && (pet.pose === 'sit' || pet.pose === 'stand')) { hop(170); pet.smallHop = true; }
     // a little note + floating "mew" text, then a heart
     burst('note', 1);
-    particles.push({ kind: 'text', text: plan.text, x: pet.x + pet.dir * 120, y: CAT_H * 0.7, vx: pet.dir * 12, vy: 38, life: 1.6, age: 0 });
+    particles.push({ kind: 'text', text: plan.text, x: pet.x + pet.dir * 85, y: CAT_H * 0.7, vx: pet.dir * 12, vy: 38, life: 1.6, age: 0 });
     setTimeout(() => burst('heart', 1), plan.ms);
   }
 
@@ -250,7 +250,7 @@
         pet.dance.t = 0;
         pet.dance.step++;
         pet.dir = -pet.dir;
-        if (pet.dance.step % 2 === 0) hop(470);
+        if (pet.dance.step % 2 === 0) hop(385);
         if (pet.dance.step === 4) burst('heart', 3);
         if (pet.dance.step >= 8) pet.dance = null;
       }
@@ -345,7 +345,7 @@
     const shrink = Math.max(0.4, 1 - pet.y / 300);
     ctx.fillStyle = 'rgba(0,0,0,0.18)';
     ctx.beginPath();
-    ctx.ellipse(pet.x, VH - GROUND - 2, 87 * shrink, 10 * shrink, 0, 0, Math.PI * 2);
+    ctx.ellipse(pet.x, VH - GROUND - 2, 58 * shrink, 7 * shrink, 0, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.save();
@@ -366,18 +366,18 @@
     for (const p of particles) {
       const a = Math.max(0, 1 - p.age / p.life);
       const sy = VH - GROUND - p.y;
-      if (p.kind === 'heart') drawGlyph(Sprite.HEART, p.x, sy, 4, '#ff5c8a', a);
-      else if (p.kind === 'note') drawGlyph(Sprite.NOTE, p.x + pet.dir * 40, sy - 20, 4, '#8a6fd1', a);
+      if (p.kind === 'heart') drawGlyph(Sprite.HEART, p.x, sy, 3, '#ff5c8a', a);
+      else if (p.kind === 'note') drawGlyph(Sprite.NOTE, p.x + pet.dir * 28, sy - 14, 3, '#8a6fd1', a);
       else if (p.kind === 'text') {
         ctx.save();
         ctx.globalAlpha = a;
-        ctx.font = '700 16px ui-monospace, "SF Mono", Menlo, monospace';
+        ctx.font = '700 13px ui-monospace, "SF Mono", Menlo, monospace';
         ctx.textAlign = 'center';
         ctx.lineWidth = 4; ctx.strokeStyle = '#fffaf3'; ctx.strokeText(p.text, p.x, sy);
         ctx.fillStyle = '#c2457a'; ctx.fillText(p.text, p.x, sy);
         ctx.restore();
       }
-      else drawGlyph(Sprite.ZED, p.x + pet.dir * 70, sy - 30, 3 + p.age * 1.5, '#7e7796', a);
+      else drawGlyph(Sprite.ZED, p.x + pet.dir * 48, sy - 20, 2 + p.age * 1.2, '#7e7796', a);
     }
 
     positionBubble();
